@@ -23,11 +23,11 @@ This repository contains sources and model for [BEVFusion](https://github.com/mi
 ![](../assets/cuda-bevfusion.gif)
 
 ## Model and Data
-- For quick practice, we provide an example data of nuScenes. You can download it from ( [Google Drive](https://drive.google.com/file/d/1RO493RSWyXbyS12yWk5ZzrixAeZQSnL8/view?usp=sharing) ) or ( [Baidu Drive](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) ). It contains the following:
+- For quick practice, we provide an example data of nuScenes. You can download it from ( [NVBox](https://nvidia.box.com/shared/static/g8vxxes3xj1288teyo4og87rn99brdf8) ) or ( [Baidu Drive](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) ). It contains the following:
   1. Camera images in 6 directions.
   2. Transformation matrix of camera/lidar/ego.
   3. Use for bevfusion-pytorch data of example-data.pth, allow export onnx only without depending on the full dataset.
-- All models (model.zip) can be downloaded from ( [Google Drive](https://drive.google.com/file/d/1bPt3D07yyVuSuzRAHySZVR2N15RqGHHN/view?usp=sharing) ) or ( [Baidu Drive](https://pan.baidu.com/s/1_6IJTzKlJ8H62W5cUPiSbA?pwd=g6b4) ). It contains the following:
+- All models (model.zip) can be downloaded from ( [NVBox](https://nvidia.box.com/shared/static/vc1ezra9kw7gu7wg3v8cwuiqshwr8b39) ) or ( [Baidu Drive](https://pan.baidu.com/s/1BiAoQ8L7nC45vEwkN3bSGQ?pwd=8jb6) ). It contains the following:
   1. swin-tiny onnx models.
   2. resnet50 onnx and pytorch models.
   3. resnet50 int8 onnx and PTQ models.
@@ -37,7 +37,7 @@ To build bevfusion, we need to depend on the following libraries:
 - CUDA >= 11.0
 - CUDNN >= 8.2
 - TensorRT >= 8.5.0
-- libprotobuf-dev == 3.6.1
+- libprotobuf-dev
 - [Compute Capability](https://developer.nvidia.com/cuda-gpus#compute) >= sm_80
 - Python >= 3.6
 
@@ -47,9 +47,9 @@ The data in the performance table was obtained by us on the Nvidia Orin platform
 - note: Please use `git clone --recursive` to pull this repository to ensure the integrity of the dependencies.
 
 ### 1. Download models and datas to CUDA-BEVFusion directory
-- download model.zip from ( [Google Drive](https://drive.google.com/file/d/1bPt3D07yyVuSuzRAHySZVR2N15RqGHHN/view?usp=sharing) ) or ( [Baidu Drive](https://pan.baidu.com/s/1_6IJTzKlJ8H62W5cUPiSbA?pwd=g6b4) )
+- download model.zip from ( [NVBox](https://nvidia.box.com/shared/static/vc1ezra9kw7gu7wg3v8cwuiqshwr8b39) ) or ( [Baidu Drive](https://pan.baidu.com/s/1_6IJTzKlJ8H62W5cUPiSbA?pwd=g6b4) )
 - download nuScenes-example-data.zip from 
-( [Google Drive](https://drive.google.com/file/d/1RO493RSWyXbyS12yWk5ZzrixAeZQSnL8/view?usp=sharing) ) or ( [Baidu Drive](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) )
+( [NVBox](https://nvidia.box.com/shared/static/g8vxxes3xj1288teyo4og87rn99brdf8) ) or ( [Baidu Drive](https://pan.baidu.com/s/1ED6eospSIF8oIQ2unU9WIQ?pwd=mtvt) )
 ```bash
 # download models and datas to CUDA-BEVFusion
 cd CUDA-BEVFusion
@@ -105,6 +105,10 @@ export CUDA_HOME=/path/to/cuda
 
 export CUDNN_Lib=/path/to/cudnn/lib
 
+# For CUDA-11.x:    SPCONV_CUDA_VERSION=11.4
+# For CUDA-12.x:    SPCONV_CUDA_VERSION=12.6
+export SPCONV_CUDA_VERSION=11.4
+
 # resnet50/resnet50int8/swint
 export DEBUG_MODEL=resnet50int8
 
@@ -128,6 +132,10 @@ bash tool/build_trt_engine.sh
 
 2. Compile and run the program
 ```bash
+# Generate the protobuf code
+bash src/onnx/make_pb.sh
+
+# Compile and run
 bash tool/run.sh
 ```
 

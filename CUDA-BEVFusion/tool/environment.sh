@@ -22,9 +22,9 @@
 
 # export CUDA_VISIBLE_DEVICES=2
 
-export TensorRT_Lib=/path/to/TensorRT/lib
-export TensorRT_Inc=/path/to/TensorRT/include
-export TensorRT_Bin=/path/to/TensorRT/bin
+export TensorRT_Lib=/path/to/tensorrt/lib
+export TensorRT_Inc=/path/to/tensorrt/include
+export TensorRT_Bin=/path/to/tensorrt/bin
 
 export CUDA_Lib=/path/to/cuda/lib64
 export CUDA_Inc=/path/to/cuda/include
@@ -33,6 +33,20 @@ export CUDA_HOME=/path/to/cuda
 
 export CUDNN_Lib=/path/to/cudnn/lib
 
+# export TensorRT_Lib=${TENSORRT_LIB}
+# export TensorRT_Inc=${TENSORRT_INCLUDE}
+# export TensorRT_Bin=${TENSORRT_BIN}
+
+# export CUDA_Lib=${CUDA_LIB}
+# export CUDA_Inc=${CUDA_INCLUDE}
+# export CUDA_Bin=${CUDA_BIN}
+
+# export CUDNN_Lib=${CUDNN_LIB}
+
+# Just used to distinguish the libspconv version, it doesn't affect the version of cuda used by your application
+# For CUDA-11.x:    SPCONV_CUDA_VERSION=11.4
+# For CUDA-12.x:    SPCONV_CUDA_VERSION=12.6
+export SPCONV_CUDA_VERSION=12.8
 
 # resnet50/resnet50int8/swint
 export DEBUG_MODEL=resnet50int8

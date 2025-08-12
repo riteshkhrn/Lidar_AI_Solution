@@ -24,11 +24,18 @@ cc        := g++
 stdcpp    := c++11
 arch      := $(shell arch)
 pwd       := $(abspath .)
-cppstrict := -Wall -Werror -Wextra -Werror=all-warnings
-custrict  := -Werror=all-warnings
+cppstrict := #-Wall -Werror -Wextra -Werror=all-warnings
+custrict  := #-Werror=all-warnings
 nvcc      := $(CUDA_HOME)/bin/nvcc
 cuda_arch := -gencode arch=compute_80,code=sm_80 \
 			 -gencode arch=compute_86,code=sm_86
+
+# For example: SPCONV_CUDA_VERSION=11.4  SPCONV_CUDA_VERSION=12.8
+# If your application uses cuda-11.x, you can set SPCONV_CUDA_VERSION=11.4
+# If your application uses cuda-12.x, you can set SPCONV_CUDA_VERSION=12.8
+spconv_cuda_version := cuda$(SPCONV_CUDA_VERSION)
+spconv_library_path := libspconv/lib/$(arch)_$(spconv_cuda_version)
+$(info Use spconv_library_path: $(spconv_library_path))
 
 ifeq ($(arch), aarch64)
 cuda_arch += -gencode arch=compute_87,code=sm_87
@@ -37,13 +44,13 @@ endif
 include_paths     := -Isrc -Ilibspconv/include -I$(CUDA_HOME)/include
 cpp_compile_flags := -std=$(stdcpp) $(strict) -g $(optimize) -fPIC -fopenmp -pthread $(include_paths)
 cu_compile_flags  := -std=$(stdcpp) $(custrict) -g $(optimize) $(cuda_arch) -Xcompiler "$(cpp_compile_flags)"
-link_flags        := -Llibspconv/lib/$(arch) -L$(CUDA_HOME)/lib64 -lcudart -lstdc++ -ldl -lspconv -pthread \
-					 -fopenmp -Wl,-rpath='$$ORIGIN' -Wl,-rpath=$(pwd)/libspconv/lib/$(arch)
+link_flags        := -L$(spconv_library_path) -L$(CUDA_HOME)/lib64 -lcudart -lstdc++ -ldl -lspconv -lprotobuf -pthread \
+					 -fopenmp -Wl,-rpath='$$ORIGIN' -Wl,-rpath=$(pwd)/$(spconv_library_path)
 
 ifeq ($(MAKECMDGOALS), pyscn)
-python_include := $(shell python -c "import sysconfig;print(sysconfig.get_path('include'))")
-python_soname  := $(shell python -c "import sysconfig;import re;print(re.sub('lib|.so|.a', '', sysconfig.get_config_var('LIBRARY')))")
-python_libpath := $(shell python -c "import sysconfig;print(sysconfig.get_config_var('LIBDIR'))")
+python_include := $(shell python3 -c "import sysconfig;print(sysconfig.get_path('include'))")
+python_soname  := $(shell python3 -c "import sysconfig;import re;print(re.sub('lib|.so|.a', '', sysconfig.get_config_var('LIBRARY')))")
+python_libpath := $(shell python3 -c "import sysconfig;print(sysconfig.get_config_var('LIBDIR'))")
 pybind_include := $(shell cd ../.. && pwd)/dependencies/pybind11/include
 $(info Use Python Include: $(python_include))
 $(info Use Python SO Name: $(python_soname))
@@ -70,12 +77,12 @@ memint8      : pro
 memfp16      : pro
 	@cd workspace && ./pro memfp16
 
-tool/pyscn.so : objs/pyscn.o
+tool/pyscn.so : objs/pyscn.o objs/onnx-parser.o objs/onnx/onnx-ml.pb.o objs/onnx/onnx-operators-ml.pb.o
 	@echo Link $@
 	@$(cc) -shared -o $@ $^ $(link_flags)
 	@echo You can run \"python tool/pytest.py\" to test
 
-workspace/pro : objs/main.o objs/voxelization.uo
+workspace/pro : objs/main.o objs/onnx-parser.o objs/voxelization.uo objs/onnx/onnx-ml.pb.o objs/onnx/onnx-operators-ml.pb.o
 	@echo Link $@
 	@$(cc) -o $@ $^ $(link_flags)
 
@@ -93,3 +100,5 @@ clean:
 	@rm -rf objs workspace/pro tool/pyscn.so
 
 .PHONY: pyscn pro clean
+
+export LD_LIBRARY_PATH:=$(spconv_library_path):$(CUDA_HOME)/lib64:$(LD_LIBRARY_PATH)

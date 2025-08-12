@@ -201,6 +201,17 @@ static int simple_draw() {
         }
         nline++;
     }
+
+    cuosd_draw_text(context, 
+        "Shakespearean quotes:\n"
+        "\n"
+        "Words cannot express true love, loyalty behavior is the best explanation.\n"
+        "Love is a woman with the ears, and if the men will love, but love is to use your eyes.\n"
+        "The empty vessels make the greatest sound.\n"
+        "No man or woman is worth your tears, and the one who is, won’t make you cry.\n"
+        "For thy sweet love remember'd such wealth brings That then I scorn to change my state with kings.\n"
+        "A sad thing in life is when you meet someone who means a lot to you, only to find out in the \nend that it was never meant to be and you just have to let go."
+        , 13, "data/simhei.ttf", 10, 10, cuOSDColor{0, 255, 0, 255}, cuOSDColor{60, 60, 60, 200});
     cuosd_apply(context, image, stream);
     cuosd_context_destroy(context);
 
@@ -216,7 +227,7 @@ static int polyline() {
 
     printf("Test cuosd_draw_polyline.\n");
     auto context = cuosd_context_create();
-    gpu::Image* image = gpu::create_image(1280, 720, gpu::ImageFormat::RGBA);
+    gpu::Image* image = gpu::create_image(1280, 720, gpu::ImageFormat::PitchLinearNV12);
     gpu::set_color(image, 255, 255, 255, 255, stream);
     gpu::copy_yuvnv12_to(image, 0, 0, 1280, 720, "data/image/nv12_3840x2160.yuv", 3840, 2160, 180, stream);
     gpu::save_image(image, "input.png", stream);
@@ -231,6 +242,35 @@ static int polyline() {
     printf("Save to output.png\n");
     gpu::save_image(image, "output.png", stream);
     gpu::free_polyline(polyline);
+    checkRuntime(cudaStreamDestroy(stream));
+    return 0;
+}
+
+static int ellipse() {
+    cudaStream_t stream = nullptr;
+    checkRuntime(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+
+    printf("Test cuosd_draw_ellipse.\n");
+    auto context = cuosd_context_create();
+    gpu::Image* image = gpu::create_image(1280, 720, gpu::ImageFormat::PitchLinearNV12);
+    gpu::set_color(image, 255, 255, 255, 255, stream);
+    gpu::copy_yuvnv12_to(image, 0, 0, 1280, 720, "data/image/nv12_3840x2160.yuv", 3840, 2160, 180, stream);
+    gpu::save_image(image, "input.png", stream);
+
+    int h = 720;
+    int w = 1280;
+    float pi = 3.1415925f;
+
+    // cuosd_draw_ellipse(context, 600, 300, 200, 50, pi/2, 5, {0, 0, 255, 200}, {0, 255, 0, 0});
+    for (int i = 0; i < 10; ++i)
+    {
+        cuosd_draw_ellipse(context, randl(0, w), randl(0, h), randl(10, 300), randl(10, 300), pi / randl(0, 360), randl(1, 10), {255, 255, 0, 200}, {0, 0, 255, 200});
+    };
+    cuosd_apply(context, image, stream);
+    cuosd_context_destroy(context);
+
+    printf("Save to output.png\n");
+    gpu::save_image(image, "output.png", stream);
     checkRuntime(cudaStreamDestroy(stream));
     return 0;
 }
@@ -291,68 +331,55 @@ static int segment() {
     return 0;
 }
 
-static int test() {
+static int segment2() {
+    cudaStream_t stream = nullptr;
+    cudaEvent_t start, end;
+    checkRuntime(cudaEventCreate(&end));
+    checkRuntime(cudaEventCreate(&start));
+    checkRuntime(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
 
-    std::vector<gpu::ImageFormat> format_vec{
-        gpu::ImageFormat::BlockLinearNV12,
-        // gpu::ImageFormat::PitchLinearNV12,
-        // gpu::ImageFormat::RGBA
-    };
+    auto context = cuosd_context_create();
+    gpu::Image* image = gpu::create_image(1280, 720, gpu::ImageFormat::BlockLinearNV12);
+    gpu::copy_yuvnv12_to(image, 0, 0, 1280, 720, "data/assets/sample.nv12", 1280, 720, 255, stream);
+    gpu::save_image(image, "input.png", stream);
 
-    for (int i = 0; i < (int)format_vec.size(); i++) {
-        gpu::ImageFormat format = format_vec[i];
-        cudaStream_t stream = nullptr;
-        cudaEvent_t start, end;
-        checkRuntime(cudaEventCreate(&end));
-        checkRuntime(cudaEventCreate(&start));
-        checkRuntime(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+    gpu::Image* mask = gpu::create_image(1280, 720, gpu::ImageFormat::RGBA);
+    gpu::copy_yuvnv12_to(mask, 0, 0, 1280, 720, "data/assets/mask.nv12", 1280, 720, 10, stream);
+    gpu::save_image(mask, "mask.png", stream);
 
-        auto context = cuosd_context_create();
-        gpu::Image* image = gpu::create_image(1932, 1200, format);
-        gpu::copy_yuvnv12_to(image, 0, 0, 1932, 1200, "data/assets/bg_1932x1200_nv12.yuv", 1932, 1200, 255, stream);
-        gpu::save_image(image, "input.png", stream);
+    if (mask->format == gpu::ImageFormat::RGBA) cuosd_draw_rgba_source(context, 0, 0, 1280, 720, mask->data0, mask->width, 4 * mask->width, mask->height);
+    if (mask->format == gpu::ImageFormat::BlockLinearNV12) cuosd_draw_nv12_source(context, 0, 0, 1280, 720, mask->data0, mask->data1, mask->width, mask->width, mask->height, 10, true);
+    if (mask->format == gpu::ImageFormat::PitchLinearNV12) cuosd_draw_nv12_source(context, 0, 0, 1280, 720, mask->data0, mask->data1, mask->width, mask->width, mask->height, 10, false);
 
-        gpu::Image* asset_image = gpu::create_image(436, 600, format);
-        gpu::copy_yuvnv12_to(asset_image, 0, 0, 436, 600, "data/assets/dk_436x600_nv12.yuv", 436, 600, 255, stream);
-        if (asset_image->format == gpu::ImageFormat::RGBA) gpu::mask_rgba_alpha(asset_image, 0, 0, 0, 255, stream);
-        gpu::save_image(asset_image, "asset.png", stream);
+    cuosd_apply(context, image, stream, false);
 
-        int count = 0;
-        for (int i=280; i<image->width; i+= 450) {
-            for (int j=300; j<image->height; j+= 600) {
-                if (asset_image->format == gpu::ImageFormat::RGBA) cuosd_draw_rgba_source(context, asset_image->data0, i, j, asset_image->width, asset_image->height);
-                if (asset_image->format == gpu::ImageFormat::BlockLinearNV12) cuosd_draw_nv12_source(context, asset_image->data0, asset_image->data1, i, j, asset_image->width, asset_image->height, {0,0,0,255}, true);
-                if (asset_image->format == gpu::ImageFormat::PitchLinearNV12) cuosd_draw_nv12_source(context, asset_image->data0, asset_image->data1, i, j, asset_image->width, asset_image->height, {0,0,0,255}, false);
-                count++;
-            }
-        }
-
-        cuosd_apply(context, image, stream, false);
-
-        for (int i = 0; i < 1000; ++i) {
-            cuosd_launch(context, image, stream);
-        }
-
-        checkRuntime(cudaStreamSynchronize(stream));
-        checkRuntime(cudaEventRecord(start, stream));
-
-        for (int i = 0; i < 1000; ++i) {
-            cuosd_launch(context, image, stream);
-        }
-
-        float gpu_time;
-        checkRuntime(cudaEventRecord(end, stream));
-        checkRuntime(cudaEventSynchronize(end));
-        checkRuntime(cudaEventElapsedTime(&gpu_time, start, end));
-
-        cuosd_context_destroy(context);
-        printf("Draw %d donkey on %dx%d/%s -> performance: %.2f us\n", count, image->width, image->height, gpu::image_format_name(format), gpu_time);
-        gpu::save_image(image, "output.png", stream);
-
-        checkRuntime(cudaEventDestroy(end));
-        checkRuntime(cudaEventDestroy(start));
-        checkRuntime(cudaStreamDestroy(stream));
+    for (int i = 0; i < 1000; ++i) {
+        cuosd_launch(context, image, stream);
     }
+
+    checkRuntime(cudaStreamSynchronize(stream));
+    checkRuntime(cudaEventRecord(start, stream));
+
+    for (int i = 0; i < 1000; ++i) {
+        cuosd_launch(context, image, stream);
+    }
+
+    float gpu_time;
+    checkRuntime(cudaEventRecord(end, stream));
+    checkRuntime(cudaEventSynchronize(end));
+    checkRuntime(cudaEventElapsedTime(&gpu_time, start, end));
+
+    printf("draw [%dx%d-%s] mask on [%dx%d-%s] image -> performance: %.2f us\n",
+            mask->width, mask->height, gpu::image_format_name(mask->format),
+            image->width, image->height, gpu::image_format_name(image->format), gpu_time);
+
+    cuosd_context_destroy(context);
+    gpu::save_image(image, "output.png", stream);
+
+    checkRuntime(cudaEventDestroy(end));
+    checkRuntime(cudaEventDestroy(start));
+    checkRuntime(cudaStreamDestroy(stream));
+
     return 0;
 }
 
@@ -736,10 +763,12 @@ int main(int argc, char **argv)
         return perf(argc, argv);
     } else if (strcmp(cmd, "simple") == 0) {
         return simple_draw();
-    } else if (strcmp(cmd, "test") == 0) {
-        return test();
     } else if (strcmp(cmd, "segment") == 0) {
         return segment();
+    } else if (strcmp(cmd, "segment2") == 0) {
+        return segment2();
+    } else if (strcmp(cmd, "ellipse") == 0) {
+        return ellipse();
     } else if (strcmp(cmd, "polyline") == 0) {
         return polyline();
     } else if (strcmp(cmd, "comp") == 0) {

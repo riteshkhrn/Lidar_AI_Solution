@@ -52,6 +52,26 @@ static __forceinline__ __device__ _T limit(_T value, _T low, _T high){
 #define INTER_RESIZE_COEF_BITS 11
 #define INTER_RESIZE_COEF_SCALE (1 << INTER_RESIZE_COEF_BITS)
 
+static __device__ void __forceinline__ yuv2rgb(
+    int y, int u, int v, uint8_t& r, uint8_t& g, uint8_t& b
+){
+    int iyval = 1220542*max(0, y - 16);
+    r = u8cast((iyval + 1673527*(v - 128)                      + (1 << 19)) >> 20);
+    g = u8cast((iyval - 852492*(v - 128) - 409993*(u - 128)    + (1 << 19)) >> 20);
+    b = u8cast((iyval                      + 2116026*(u - 128) + (1 << 19)) >> 20);
+}
+
+static __device__ void __forceinline__ rgb2yuv(
+    int r, int g, int b, uint8_t& y, uint8_t& u, uint8_t& v
+){
+    y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+    u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+    v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+    // y = u8cast(0.299f * r + 0.587f * g + 0.114f * b);
+    // u = u8cast(-0.1687f * r - 0.3313 * g + 0.5f * b + 128);
+    // v = u8cast(0.5f * r - 0.4187f * g - 0.0813f * b + 128);
+}
+
 // inbox_single_pixel:
 // check if given coordinate is in box
 //      a --- d
@@ -93,6 +113,36 @@ CircleCommand::CircleCommand(int cx, int cy, int radius, int thickness, unsigned
     this->bounding_bottom = cy + radius + half_thickness;
 }
 
+EllipseCommand::EllipseCommand(int cx, int cy, int width, int height, float yaw, int thickness, unsigned char c0, unsigned char c1, unsigned char c2, unsigned char c3) {
+    this->type = CommandType::Ellipse;
+    this->cx = cx;
+    this->cy = cy;
+    this->width     = width;
+    this->height    = height;
+    this->yaw       = yaw;
+    this->thickness = thickness;
+    this->c0 = c0;
+    this->c1 = c1;
+    this->c2 = c2;
+    this->c3 = c3;
+
+    int a = max((width / 2), 1);
+    int b = max((height / 2), 1);
+    float cos_ = cos(yaw);
+    float sin_ = sin(yaw);
+
+    this->radius  = max(a, b);
+    this->afactor = ((cos_*cos_)/float(a*a) + (sin_*sin_)/float(b*b)) * this->radius * this->radius;
+    this->bfactor = (2 * (1/float(b*b) - 1/float(a*a)) * sin_ * cos_) * this->radius * this->radius;
+    this->cfactor = ((sin_*sin_)/float(a*a) + (cos_*cos_)/float(b*b)) * this->radius * this->radius;
+
+    int half_thickness = (thickness + 1) / 2 + 2;
+    this->bounding_left  = cx - this->radius - half_thickness;
+    this->bounding_right = cx + this->radius + half_thickness;
+    this->bounding_top   = cy - this->radius - half_thickness;
+    this->bounding_bottom = cy + this->radius + half_thickness;
+}
+
 RectangleCommand::RectangleCommand() {
     this->type = CommandType::Rectangle;
 }
@@ -119,40 +169,12 @@ PolyFillCommand::PolyFillCommand() {
     this->type = CommandType::PolyFill;
 }
 
-RGBASourceCommand::RGBASourceCommand(int cx, int cy, int width, int height, void* d_src) {
-    this->cx = cx;
-    this->cy = cy;
-    this->width = width;
-    this->height = height;
+RGBASourceCommand::RGBASourceCommand() {
     this->type = CommandType::RGBASource;
-    this->d_src = d_src;
-
-    this->bounding_left  = cx - (width + 1) / 2;
-    this->bounding_right = cx + (width + 1) / 2;
-    this->bounding_top   = cy - (height + 1) / 2;
-    this->bounding_bottom = cy + (height + 1) / 2;
 }
 
-NV12SourceCommand::NV12SourceCommand(int cx, int cy, int width, int height, void* d_src0, void* d_src1, bool block_linear, unsigned char c0, unsigned char c1, unsigned char c2, unsigned char c3) {
-    this->cx = cx;
-    this->cy = cy;
-    this->width = width;
-    this->height = height;
+NV12SourceCommand::NV12SourceCommand() {
     this->type = CommandType::NV12Source;
-
-    this->d_src0 = d_src0;
-    this->d_src1 = d_src1;
-    this->block_linear = block_linear;
-
-    this->c0 = c0;
-    this->c1 = c1;
-    this->c2 = c2;
-    this->c3 = c3;
-
-    this->bounding_left  = cx - (width + 1) / 2;
-    this->bounding_right = cx + (width + 1) / 2;
-    this->bounding_top   = cy - (height + 1) / 2;
-    this->bounding_bottom = cy + (height + 1) / 2;
 }
 
 // interpolation_fn:
@@ -321,6 +343,39 @@ static __device__ void render_circle_interpolation(
     if (alpha3){blend_single_color(color[3], p->c0, p->c1, p->c2, alpha3);}
 }
 
+// render_ellipse_interpolation:
+// render ellipse with border interpolation
+static __device__ void render_ellipse_interpolation(
+    int ix, int iy, EllipseCommand* p, uchar4 color[4]
+) {
+    float tr0 = sqrt((float)(ix - p->cx) * (ix - p->cx) * p->afactor + (ix - p->cx) *  (iy - p->cy) * p->bfactor + (iy - p->cy) * (iy - p->cy) * p->cfactor);
+    float tr1 = sqrt((float)(ix + 1 - p->cx) * (ix + 1 - p->cx) * p->afactor + (ix + 1 - p->cx) * (iy - p->cy) * p->bfactor + (iy - p->cy) * (iy - p->cy) * p->cfactor);
+    float tr2 = sqrt((float)(ix - p->cx) * (ix - p->cx) * p->afactor + (ix - p->cx) * (iy + 1 - p->cy) * p->bfactor + (iy + 1 - p->cy) * (iy + 1 - p->cy) * p->cfactor);
+    float tr3 = sqrt((float)(ix + 1 - p->cx) * (ix + 1 - p->cx) * p->afactor + (ix + 1 - p->cx) * (iy + 1 - p->cy) * p->bfactor + (iy + 1 - p->cy) * (iy + 1 - p->cy) * p->cfactor);
+
+    int inner_boundsize = p->radius - p->thickness / 2;
+    int external_boundsize = inner_boundsize + p->thickness;
+
+    if (p->thickness < 0) {
+        if (p->thickness == -1) {
+            external_boundsize = p->radius;
+        } else {
+            external_boundsize = inner_boundsize;
+        }
+        inner_boundsize = 0;
+    }
+
+    unsigned char alpha0 = interpolation_fn(tr0, inner_boundsize, external_boundsize, 1, p->c3);
+    unsigned char alpha1 = interpolation_fn(tr1, inner_boundsize, external_boundsize, 1, p->c3);
+    unsigned char alpha2 = interpolation_fn(tr2, inner_boundsize, external_boundsize, 1, p->c3);
+    unsigned char alpha3 = interpolation_fn(tr3, inner_boundsize, external_boundsize, 1, p->c3);
+
+    if (alpha0){blend_single_color(color[0], p->c0, p->c1, p->c2, alpha0);}
+    if (alpha1){blend_single_color(color[1], p->c0, p->c1, p->c2, alpha1);}
+    if (alpha2){blend_single_color(color[2], p->c0, p->c1, p->c2, alpha2);}
+    if (alpha3){blend_single_color(color[3], p->c0, p->c1, p->c2, alpha3);}
+}
+
 static __device__ void sample_pixel_bilinear(
     float* d_ptr, int x, int y, float sx, float sy, int width, int height, float threshold, unsigned char& a
 ) {
@@ -359,7 +414,7 @@ static __device__ bool isRayIntersectsSegment(int p0, int p1, int s0, int s1, in
 		return false;
 	if (e1 == p1 && s1 > p1)
 		return false;
-	if (s0 < p0 && e1 < p1)
+	if (s0 < p0 && e0 < p0)
 		return false;
 	int xseg = e0 - (e0 - s0) * (e1 - p1) / (e1 - s1);
 	if (xseg < p0)
@@ -464,142 +519,155 @@ static __device__ bool render_text(
     return true;
 }
 
+static __device__ void blend_nv12_bilinear(
+    void* d_ptr0, void* d_ptr1, int x, int y, float sx, float sy, int width, int stride, int height, uchar4* color, unsigned char c3, bool block_linear
+) {
+    float src_x = (x + 0.5f) * sx - 0.5f;
+    float src_y = (y + 0.5f) * sy - 0.5f;
+    int y_low  = floorf(src_y);
+    int x_low  = floorf(src_x);
+    int y_high = limit(y_low + 1, 0, height - 1);
+    int x_high = limit(x_low + 1, 0, width - 1);
+    y_low = limit(y_low, 0, height - 1);
+    x_low = limit(x_low, 0, width - 1);
+
+    int ly = rint((src_y - y_low) * INTER_RESIZE_COEF_SCALE);
+    int lx = rint((src_x - x_low) * INTER_RESIZE_COEF_SCALE);
+    int hy = INTER_RESIZE_COEF_SCALE - ly;
+    int hx = INTER_RESIZE_COEF_SCALE - lx;
+
+    uchar4 _scr[5];
+
+    if (block_linear) {
+        _scr[0].x = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr0, x_low, y_low);
+        _scr[1].x = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr0, x_high, y_low);
+        _scr[2].x = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr0, x_low, y_high);
+        _scr[3].x = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr0, x_high, y_high);
+
+        _scr[0].y = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_low >> 1), y_low >> 1);
+        _scr[1].y = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_high >> 1), y_low >> 1);
+        _scr[2].y = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_low >> 1), y_high >> 1);
+        _scr[3].y = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_high >> 1), y_high >> 1);
+
+        _scr[0].z = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_low >> 1) + 1, y_low >> 1);
+        _scr[1].z = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_high >> 1) + 1, y_low >> 1);
+        _scr[2].z = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_low >> 1) + 1, y_high >> 1);
+        _scr[3].z = surf2Dread<unsigned char>((cudaSurfaceObject_t)d_ptr1, 2 * (x_high >> 1) + 1, y_high >> 1);
+    }
+    else {
+        _scr[0] = make_uchar4(((unsigned char *)d_ptr0)[y_low * stride + x_low], ((unsigned char *)d_ptr1)[(y_low >> 1)* stride + 2 * (x_low >> 1)], ((unsigned char *)d_ptr1)[(y_low >> 1)* stride + 2 * (x_low >> 1) + 1], c3);
+        _scr[1] = make_uchar4(((unsigned char *)d_ptr0)[y_low * stride + x_high], ((unsigned char *)d_ptr1)[(y_low >> 1)* stride + 2 * (x_high >> 1)], ((unsigned char *)d_ptr1)[(y_low >> 1)* stride + 2 * (x_high >> 1) + 1], c3);
+        _scr[2] = make_uchar4(((unsigned char *)d_ptr0)[y_high * stride + x_low], ((unsigned char *)d_ptr1)[(y_high >> 1)* stride + 2 * (x_low >> 1)], ((unsigned char *)d_ptr1)[(y_high >> 1)* stride + 2 * (x_low >> 1) + 1], c3);
+        _scr[3] = make_uchar4(((unsigned char *)d_ptr0)[y_high * stride + x_high], ((unsigned char *)d_ptr1)[(y_high >> 1)* stride + 2 * (x_high >> 1)], ((unsigned char *)d_ptr1)[(y_high >> 1)* stride + 2 * (x_high >> 1) + 1], c3);
+    }
+
+    yuv2rgb(_scr[0].x, _scr[0].y, _scr[0].z, _scr[0].x, _scr[0].y, _scr[0].z);
+    yuv2rgb(_scr[1].x, _scr[1].y, _scr[1].z, _scr[1].x, _scr[1].y, _scr[1].z);
+    yuv2rgb(_scr[2].x, _scr[2].y, _scr[2].z, _scr[2].x, _scr[2].y, _scr[2].z);
+    yuv2rgb(_scr[3].x, _scr[3].y, _scr[3].z, _scr[3].x, _scr[3].y, _scr[3].z);
+
+    _scr[4].x = ( ((hy * ((hx * _scr[0].x + lx * _scr[1].x) >> 4)) >> 16) + ((ly * ((hx * _scr[2].x + lx * _scr[3].x) >> 4)) >> 16) + 2 )>>2;
+    _scr[4].y = ( ((hy * ((hx * _scr[0].y + lx * _scr[1].y) >> 4)) >> 16) + ((ly * ((hx * _scr[2].y + lx * _scr[3].y) >> 4)) >> 16) + 2 )>>2;
+    _scr[4].z = ( ((hy * ((hx * _scr[0].z + lx * _scr[1].z) >> 4)) >> 16) + ((ly * ((hx * _scr[2].z + lx * _scr[3].z) >> 4)) >> 16) + 2 )>>2;
+
+    blend_single_color(color[0], _scr[4].x, _scr[4].y, _scr[4].z, c3);
+}
+
 // render_bl_nv12_src:
 // render color from nv12 bl source image
-static __device__ void render_bl_nv12_src(
-    int ix, int iy, int left, int top, int right, int bottom, cudaSurfaceObject_t d_src0, cudaSurfaceObject_t d_src1,
-    uchar4* color, unsigned char trans_0, unsigned char trans_1, unsigned char trans_2, unsigned char trans_a
+static __device__ void render_nv12_src(
+    int ix, int iy, NV12SourceCommand* p, uchar4 color[4]
 ) {
-    if (ix + 1 < left || iy + 1 < top || ix >= right || iy >= bottom)
+    if (ix + 1 < p->bounding_left || iy + 1 < p->bounding_top || ix >= p->bounding_right || iy >= p->bounding_bottom)
         return;
 
-    unsigned char alpha0 = ix   < left || iy < top   || ix >= right   || iy >= bottom ? 0 : 127;
-    unsigned char alpha1 = ix+1 < left || iy < top   || ix+1 >= right || iy >= bottom ? 0 : 127;
-    unsigned char alpha2 = ix   < left || iy+1 < top || ix >= right   || iy+1 >= bottom ? 0 : 127;
-    unsigned char alpha3 = ix+1 < left || iy+1 < top || ix+1 >= right || iy+1 >= bottom ? 0 : 127;
+    unsigned char alpha0 = ix   < p->bounding_left || iy < p->bounding_top   || ix >= p->bounding_right   || iy >= p->bounding_bottom ? 0 : 127;
+    unsigned char alpha1 = ix+1 < p->bounding_left || iy < p->bounding_top   || ix+1 >= p->bounding_right || iy >= p->bounding_bottom ? 0 : 127;
+    unsigned char alpha2 = ix   < p->bounding_left || iy+1 < p->bounding_top || ix >= p->bounding_right   || iy+1 >= p->bounding_bottom ? 0 : 127;
+    unsigned char alpha3 = ix+1 < p->bounding_left || iy+1 < p->bounding_top || ix+1 >= p->bounding_right || iy+1 >= p->bounding_bottom ? 0 : 127;
 
-    int fx = ix - left;
-    int fy = iy - top;
+    int fx = ix - p->bounding_left;
+    int fy = iy - p->bounding_top;
 
-    uchar4& c0 = color[0];
-    uchar4& c1 = color[1];
-    uchar4& c2 = color[2];
-    uchar4& c3 = color[3];
-
-    if(alpha0){
-        c0 = make_uchar4(
-            surf2Dread<unsigned char>(d_src0, fx, fy),
-            surf2Dread<unsigned char>(d_src1, fx, fy >> 1),
-            surf2Dread<unsigned char>(d_src1, fx + 1, fy >> 1), 0
-        );
-        c0.w = c0.x == trans_0 && c0.y == trans_1 && c0.z == trans_2 ? 0 : trans_a;
+    if(alpha0) {
+        blend_nv12_bilinear(p->d_src0, p->d_src1, fx, fy, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[0], p->c3, p->block_linear);
     }
 
-    if(alpha1){
-        c1 = make_uchar4(surf2Dread<unsigned char>(d_src0, fx + 1, fy),
-                                          surf2Dread<unsigned char>(d_src1, fx, fy >> 1),
-                                          surf2Dread<unsigned char>(d_src1, fx + 1, fy >> 1), 0);
-        c1.w = c1.x == trans_0 && c1.y == trans_1 && c1.z == trans_2 ? 0 : trans_a;
+    if(alpha1) {
+        blend_nv12_bilinear(p->d_src0, p->d_src1, fx+1, fy, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[1], p->c3, p->block_linear);
     }
 
-    if(alpha2){
-        c2 = make_uchar4(surf2Dread<unsigned char>(d_src0, fx, fy + 1),
-                                          surf2Dread<unsigned char>(d_src1, fx, fy >> 1),
-                                          surf2Dread<unsigned char>(d_src1, fx + 1, fy >> 1), 0);
-        c2.w = c2.x == trans_0 && c2.y == trans_1 && c2.z == trans_2 ? 0 : trans_a;
+    if(alpha2) {
+        blend_nv12_bilinear(p->d_src0, p->d_src1, fx, fy+1, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[2], p->c3, p->block_linear);
     }
 
-    if(alpha3){
-        c3 = make_uchar4(surf2Dread<unsigned char>(d_src0, fx + 1, fy + 1),
-                                          surf2Dread<unsigned char>(d_src1, fx, fy >> 1),
-                                          surf2Dread<unsigned char>(d_src1, fx + 1, fy >> 1), 0);
-        c3.w = c3.x == trans_0 && c3.y == trans_1 && c3.z == trans_2 ? 0 : trans_a;
+    if(alpha3) {
+        blend_nv12_bilinear(p->d_src0, p->d_src1, fx+1, fy+1, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[3], p->c3, p->block_linear);
     }
 }
 
-// render_pl_nv12_src:
-// render color from nv12 pl source image
-static __device__ void render_pl_nv12_src(
-    int ix, int iy, int left, int top, int right, int bottom, const unsigned char* d_src0, const unsigned char* d_src1,
-    uchar4* color, unsigned char trans_0, unsigned char trans_1, unsigned char trans_2, unsigned char trans_a
+static __device__ void blend_rgba_bilinear(
+    uint8_t* d_ptr, int x, int y, float sx, float sy, int width, int stride, int height, uchar4* color
 ) {
-    if (ix + 1 < left || iy + 1 < top || ix >= right || iy >= bottom)
-        return;
+    float src_x = (x + 0.5f) * sx - 0.5f;
+    float src_y = (y + 0.5f) * sy - 0.5f;
+    int y_low  = floorf(src_y);
+    int x_low  = floorf(src_x);
+    int y_high = limit(y_low + 1, 0, height - 1);
+    int x_high = limit(x_low + 1, 0, width - 1);
+    y_low = limit(y_low, 0, height - 1);
+    x_low = limit(x_low, 0, width - 1);
 
-    unsigned char alpha0 = ix   < left || iy < top   || ix >= right   || iy >= bottom ? 0 : 127;
-    unsigned char alpha1 = ix+1 < left || iy < top   || ix+1 >= right || iy >= bottom ? 0 : 127;
-    unsigned char alpha2 = ix   < left || iy+1 < top || ix >= right   || iy+1 >= bottom ? 0 : 127;
-    unsigned char alpha3 = ix+1 < left || iy+1 < top || ix+1 >= right || iy+1 >= bottom ? 0 : 127;
+    int ly = rint((src_y - y_low) * INTER_RESIZE_COEF_SCALE);
+    int lx = rint((src_x - x_low) * INTER_RESIZE_COEF_SCALE);
+    int hy = INTER_RESIZE_COEF_SCALE - ly;
+    int hx = INTER_RESIZE_COEF_SCALE - lx;
 
-    int fx = ix - left;
-    int fy = iy - top;
+    uchar4 _scr[5];
 
-    auto width = right - left;
-    int offset_0 = fy * width + fx;
-    int offset_1 = (fy >> 1)* width + fx;
-    int offset_2 = (fy >> 1)* width + fx + 1;
+    _scr[0] = *(uchar4 *)&d_ptr[4 * x_low + y_low * stride];
+    _scr[1] = *(uchar4 *)&d_ptr[4 * x_high + y_low * stride];
+    _scr[2] = *(uchar4 *)&d_ptr[4 * x_low + y_high * stride];
+    _scr[3] = *(uchar4 *)&d_ptr[4 * x_high + y_high * stride];
 
-    uchar4& c0 = color[0];
-    uchar4& c1 = color[1];
-    uchar4& c2 = color[2];
-    uchar4& c3 = color[3];
+    _scr[4].x = ( ((hy * ((hx * _scr[0].x + lx * _scr[1].x) >> 4)) >> 16) + ((ly * ((hx * _scr[2].x + lx * _scr[3].x) >> 4)) >> 16) + 2 )>>2;
+    _scr[4].y = ( ((hy * ((hx * _scr[0].y + lx * _scr[1].y) >> 4)) >> 16) + ((ly * ((hx * _scr[2].y + lx * _scr[3].y) >> 4)) >> 16) + 2 )>>2;
+    _scr[4].z = ( ((hy * ((hx * _scr[0].z + lx * _scr[1].z) >> 4)) >> 16) + ((ly * ((hx * _scr[2].z + lx * _scr[3].z) >> 4)) >> 16) + 2 )>>2;
+    _scr[4].w = ( ((hy * ((hx * _scr[0].w + lx * _scr[1].w) >> 4)) >> 16) + ((ly * ((hx * _scr[2].w + lx * _scr[3].w) >> 4)) >> 16) + 2 )>>2;
 
-    if (alpha0) {
-        c0 = make_uchar4(d_src0[offset_0], d_src1[offset_1], d_src1[offset_2], 0);
-        c0.w = c0.x == trans_0 && c0.y == trans_1 && c0.z == trans_2 ? 0 : trans_a;
-    }
-
-    if (alpha1) {
-        c1 = make_uchar4(d_src0[offset_0 + 1], d_src1[offset_1], d_src1[offset_2], 0);
-        c1.w = c1.x == trans_0 && c1.y == trans_1 && c1.z == trans_2 ? 0 : trans_a;
-    }
-
-    if (alpha2) {
-        c2 = make_uchar4(d_src0[offset_0 + width], d_src1[offset_1], d_src1[offset_2], 0);
-        c2.w = c2.x == trans_0 && c2.y == trans_1 && c2.z == trans_2 ? 0 : trans_a;
-    }
-
-    if (alpha3) {
-        c3 = make_uchar4(d_src0[offset_0 + width + 1], d_src1[offset_1], d_src1[offset_2], 0);
-        c3.w = c3.x == trans_0 && c3.y == trans_1 && c3.z == trans_2 ? 0 : trans_a;
-    }
+    blend_single_color(color[0], _scr[4].x, _scr[4].y, _scr[4].z, _scr[4].w);
 }
 
 // render_rgba_src:
 // render color from rgba source image
 static __device__ void render_rgba_src(
-    int ix, int iy, int left, int top, int right, int bottom, const unsigned char* d_src,
-    uchar4* color
+    int ix, int iy, RGBASourceCommand* p, uchar4 color[4]
 ) {
-    if (ix + 1 < left || iy + 1 < top || ix >= right || iy >= bottom)
+    if (ix + 1 < p->bounding_left || iy + 1 < p->bounding_top || ix >= p->bounding_right || iy >= p->bounding_bottom)
         return;
 
-    unsigned char alpha0 = ix   < left || iy < top   || ix >= right   || iy >= bottom ? 0 : 127;
-    unsigned char alpha1 = ix+1 < left || iy < top   || ix+1 >= right || iy >= bottom ? 0 : 127;
-    unsigned char alpha2 = ix   < left || iy+1 < top || ix >= right   || iy+1 >= bottom ? 0 : 127;
-    unsigned char alpha3 = ix+1 < left || iy+1 < top || ix+1 >= right || iy+1 >= bottom ? 0 : 127;
+    unsigned char alpha0 = ix   < p->bounding_left || iy < p->bounding_top   || ix >= p->bounding_right   || iy >= p->bounding_bottom ? 0 : 127;
+    unsigned char alpha1 = ix+1 < p->bounding_left || iy < p->bounding_top   || ix+1 >= p->bounding_right || iy >= p->bounding_bottom ? 0 : 127;
+    unsigned char alpha2 = ix   < p->bounding_left || iy+1 < p->bounding_top || ix >= p->bounding_right   || iy+1 >= p->bounding_bottom ? 0 : 127;
+    unsigned char alpha3 = ix+1 < p->bounding_left || iy+1 < p->bounding_top || ix+1 >= p->bounding_right || iy+1 >= p->bounding_bottom ? 0 : 127;
 
-    int fx = ix - left;
-    int fy = iy - top;
+    int fx = ix - p->bounding_left;
+    int fy = iy - p->bounding_top;
 
-    auto width = right - left;
-    int offset_0 = (fy * width + fx) * 4;
-    int offset_1 = ((fy + 1) * width + fx) * 4;
-
-    if (alpha0) {
-        color[0] = make_uchar4(d_src[offset_0], d_src[offset_0 + 1], d_src[offset_0 + 2], d_src[offset_0 + 3]);
+    if(alpha0) {
+        blend_rgba_bilinear((uint8_t *)p->d_src, fx, fy, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[0]);
     }
 
-    if (alpha1) {
-        color[1] = make_uchar4(d_src[offset_0 + 4], d_src[offset_0 + 5], d_src[offset_0 + 6], d_src[offset_0 + 7]);
+    if(alpha1) {
+        blend_rgba_bilinear((uint8_t *)p->d_src, fx+1, fy, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[1]);
     }
 
-    if (alpha2) {
-        color[2] = make_uchar4(d_src[offset_1], d_src[offset_1 + 1], d_src[offset_1 + 2], d_src[offset_1 + 3]);
+    if(alpha2) {
+        blend_rgba_bilinear((uint8_t *)p->d_src, fx, fy+1, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[2]);
     }
 
-    if (alpha3) {
-        color[3] = make_uchar4(d_src[offset_1 + 4], d_src[offset_1 + 5], d_src[offset_1 + 6], d_src[offset_1 + 7]);
+    if(alpha3) {
+        blend_rgba_bilinear((uint8_t *)p->d_src, fx+1, fy+1, p->scale_x, p->scale_y, p->src_width, p->src_stride, p->src_height, &color[3]);
     }
 }
 
@@ -663,30 +731,40 @@ struct BlendingPixel<ImageFormat::BlockLinearNV12>{
         unsigned char img_u = surf2Dread<unsigned char>((cudaSurfaceObject_t)image1, x,     y / 2);
         unsigned char img_v = surf2Dread<unsigned char>((cudaSurfaceObject_t)image1, x + 1, y / 2);
 
-        int alpha = (int)plot_colors[0].w + (int)plot_colors[1].w + (int)plot_colors[2].w + (int)plot_colors[3].w;
-        int meanu =
-            (
-                plot_colors[0].y*(int)plot_colors[0].w +
-                plot_colors[1].y*(int)plot_colors[1].w +
-                plot_colors[2].y*(int)plot_colors[2].w +
-                plot_colors[3].y*(int)plot_colors[3].w
-            ) / alpha;
-        int meanv =
-            (
-                plot_colors[0].z*(int)plot_colors[0].w +
-                plot_colors[1].z*(int)plot_colors[1].w +
-                plot_colors[2].z*(int)plot_colors[2].w +
-                plot_colors[3].z*(int)plot_colors[3].w
-            ) / alpha;
-        alpha >>= 2;
+        uchar3 rgb[4];
+        yuv2rgb(img_y0, img_u, img_v, rgb[0].x, rgb[0].y, rgb[0].z);
+        yuv2rgb(img_y1, img_u, img_v, rgb[1].x, rgb[1].y, rgb[1].z);
+        yuv2rgb(img_y2, img_u, img_v, rgb[2].x, rgb[2].y, rgb[2].z);
+        yuv2rgb(img_y3, img_u, img_v, rgb[3].x, rgb[3].y, rgb[3].z);
 
-        surf2Dwrite<unsigned char>((plot_colors[0].x * (int)plot_colors[0].w + (255 - plot_colors[0].w) * img_y0) >> 8, (cudaSurfaceObject_t)image0, x + 0, y);
-        surf2Dwrite<unsigned char>((plot_colors[1].x * (int)plot_colors[1].w + (255 - plot_colors[1].w) * img_y1) >> 8, (cudaSurfaceObject_t)image0, x + 1, y);
-        surf2Dwrite<unsigned char>((plot_colors[2].x * (int)plot_colors[2].w + (255 - plot_colors[2].w) * img_y2) >> 8, (cudaSurfaceObject_t)image0, x + 0, y + 1);
-        surf2Dwrite<unsigned char>((plot_colors[3].x * (int)plot_colors[3].w + (255 - plot_colors[3].w) * img_y3) >> 8, (cudaSurfaceObject_t)image0, x + 1, y + 1);
+        for (int i = 0; i < 4; ++i) {
+            uchar4& rcolor   = plot_colors[i];
+            uchar3& lcolor   = rgb[i];
+            int foreground_alpha = rcolor.w;
+            int background_alpha = 255;
+            int blend_alpha      = ((background_alpha * (255 - foreground_alpha)) >> 8) + foreground_alpha;
+            lcolor.x = u8cast((((lcolor.x * background_alpha * (255 - foreground_alpha))>>8) + (rcolor.x * foreground_alpha)) / blend_alpha);
+            lcolor.y = u8cast((((lcolor.y * background_alpha * (255 - foreground_alpha))>>8) + (rcolor.y * foreground_alpha)) / blend_alpha);
+            lcolor.z = u8cast((((lcolor.z * background_alpha * (255 - foreground_alpha))>>8) + (rcolor.z * foreground_alpha)) / blend_alpha);
+        }
 
-        surf2Dwrite<unsigned char>((alpha * meanu + (255 - alpha) * img_u) >> 8, (cudaSurfaceObject_t)image1, x    , y / 2);
-        surf2Dwrite<unsigned char>((alpha * meanv + (255 - alpha) * img_v) >> 8, (cudaSurfaceObject_t)image1, x + 1, y / 2);
+        uchar4 img_u4, img_v4;
+
+        rgb2yuv(rgb[0].x, rgb[0].y, rgb[0].z, img_y0, img_u4.x, img_v4.x);
+        rgb2yuv(rgb[1].x, rgb[1].y, rgb[1].z, img_y1, img_u4.y, img_v4.y);
+        rgb2yuv(rgb[2].x, rgb[2].y, rgb[2].z, img_y2, img_u4.z, img_v4.z);
+        rgb2yuv(rgb[3].x, rgb[3].y, rgb[3].z, img_y3, img_u4.w, img_v4.w);
+
+        int meanu = (img_u4.x + img_u4.y + img_u4.z + img_u4.w) / 4;
+        int meanv = (img_v4.x + img_v4.y + img_v4.z + img_v4.w) / 4;
+
+        surf2Dwrite<unsigned char>(img_y0, (cudaSurfaceObject_t)image0, x + 0, y);
+        surf2Dwrite<unsigned char>(img_y1, (cudaSurfaceObject_t)image0, x + 1, y);
+        surf2Dwrite<unsigned char>(img_y2, (cudaSurfaceObject_t)image0, x + 0, y + 1);
+        surf2Dwrite<unsigned char>(img_y3, (cudaSurfaceObject_t)image0, x + 1, y + 1);
+
+        surf2Dwrite<unsigned char>(u8cast(meanu), (cudaSurfaceObject_t)image1, x    , y / 2);
+        surf2Dwrite<unsigned char>(u8cast(meanv), (cudaSurfaceObject_t)image1, x + 1, y / 2);
     }
 };
 
@@ -705,29 +783,35 @@ struct BlendingPixel<ImageFormat::PitchLinearNV12>{
         unsigned char& img_u = img_uv_ptr[0];
         unsigned char& img_v = img_uv_ptr[1];
 
-        int alpha = (int)plot_colors[0].w + (int)plot_colors[1].w + (int)plot_colors[2].w + (int)plot_colors[3].w;
-        int meanu =
-            (
-                plot_colors[0].y*(int)plot_colors[0].w +
-                plot_colors[1].y*(int)plot_colors[1].w +
-                plot_colors[2].y*(int)plot_colors[2].w +
-                plot_colors[3].y*(int)plot_colors[3].w
-            ) / alpha;
-        int meanv =
-            (
-                plot_colors[0].z*(int)plot_colors[0].w +
-                plot_colors[1].z*(int)plot_colors[1].w +
-                plot_colors[2].z*(int)plot_colors[2].w +
-                plot_colors[3].z*(int)plot_colors[3].w
-            ) / alpha;
-        alpha >>= 2;
+        uchar3 rgb[4];
+        yuv2rgb(img_y0, img_u, img_v, rgb[0].x, rgb[0].y, rgb[0].z);
+        yuv2rgb(img_y1, img_u, img_v, rgb[1].x, rgb[1].y, rgb[1].z);
+        yuv2rgb(img_y2, img_u, img_v, rgb[2].x, rgb[2].y, rgb[2].z);
+        yuv2rgb(img_y3, img_u, img_v, rgb[3].x, rgb[3].y, rgb[3].z);
 
-        img_y0 = (plot_colors[0].x * (int)plot_colors[0].w + (255 - plot_colors[0].w) * img_y0) >> 8;
-        img_y1 = (plot_colors[1].x * (int)plot_colors[1].w + (255 - plot_colors[1].w) * img_y1) >> 8;
-        img_y2 = (plot_colors[2].x * (int)plot_colors[2].w + (255 - plot_colors[2].w) * img_y2) >> 8;
-        img_y3 = (plot_colors[3].x * (int)plot_colors[3].w + (255 - plot_colors[3].w) * img_y3) >> 8;
-        img_u = (alpha * meanu + (255 - alpha) * img_u) >> 8;
-        img_v = (alpha * meanv + (255 - alpha) * img_v) >> 8;
+        for (int i = 0; i < 4; ++i) {
+            uchar4& rcolor   = plot_colors[i];
+            uchar3& lcolor   = rgb[i];
+            int foreground_alpha = rcolor.w;
+            int background_alpha = 255;
+            int blend_alpha      = ((background_alpha * (255 - foreground_alpha)) >> 8) + foreground_alpha;
+            lcolor.x = u8cast((((lcolor.x * background_alpha * (255 - foreground_alpha))>>8) + (rcolor.x * foreground_alpha)) / blend_alpha);
+            lcolor.y = u8cast((((lcolor.y * background_alpha * (255 - foreground_alpha))>>8) + (rcolor.y * foreground_alpha)) / blend_alpha);
+            lcolor.z = u8cast((((lcolor.z * background_alpha * (255 - foreground_alpha))>>8) + (rcolor.z * foreground_alpha)) / blend_alpha);
+        }
+
+        uchar4 img_u4, img_v4;
+
+        rgb2yuv(rgb[0].x, rgb[0].y, rgb[0].z, img_y0, img_u4.x, img_v4.x);
+        rgb2yuv(rgb[1].x, rgb[1].y, rgb[1].z, img_y1, img_u4.y, img_v4.y);
+        rgb2yuv(rgb[2].x, rgb[2].y, rgb[2].z, img_y2, img_u4.z, img_v4.z);
+        rgb2yuv(rgb[3].x, rgb[3].y, rgb[3].z, img_y3, img_u4.w, img_v4.w);
+
+        int meanu = (img_u4.x + img_u4.y + img_u4.z + img_u4.w) / 4;
+        int meanv = (img_v4.x + img_v4.y + img_v4.z + img_v4.w) / 4;
+
+        img_u = u8cast(meanu);
+        img_v = u8cast(meanv);
     }
 };
 
@@ -814,6 +898,11 @@ static __global__ void render_elements_kernel(
                 render_circle_interpolation(ix, iy, circle_cmd, context_color);
                 break;
             }
+            case CommandType::Ellipse:{
+                EllipseCommand* ellipse_cmd = (EllipseCommand*)pcommand;
+                render_ellipse_interpolation(ix, iy, ellipse_cmd, context_color);
+                break;
+            }
             case CommandType::Segment:{
                 SegmentCommand* seg_cmd = (SegmentCommand*)pcommand;
                 render_segment_bilinear(ix, iy, seg_cmd, context_color);
@@ -826,28 +915,12 @@ static __global__ void render_elements_kernel(
             }
             case CommandType::RGBASource:{
                 RGBASourceCommand* rgba_src_cmd = (RGBASourceCommand*)pcommand;
-                render_rgba_src(
-                    ix, iy, rgba_src_cmd->bounding_left, rgba_src_cmd->bounding_top, rgba_src_cmd->bounding_left + rgba_src_cmd->width, rgba_src_cmd->bounding_top + rgba_src_cmd->height,
-                    (unsigned char*)rgba_src_cmd->d_src, context_color
-                );
+                render_rgba_src(ix, iy, rgba_src_cmd, context_color);
                 break;
             }
             case CommandType::NV12Source:{
                 NV12SourceCommand* nv12_src_cmd = (NV12SourceCommand*)pcommand;
-                if (nv12_src_cmd->block_linear) {
-                    render_bl_nv12_src(
-                        ix, iy, nv12_src_cmd->bounding_left, nv12_src_cmd->bounding_top, nv12_src_cmd->bounding_left + nv12_src_cmd->width, nv12_src_cmd->bounding_top + nv12_src_cmd->height,
-                        (cudaSurfaceObject_t)nv12_src_cmd->d_src0, (cudaSurfaceObject_t)nv12_src_cmd->d_src1, context_color,
-                        pcommand->c0, pcommand->c1, pcommand->c2, pcommand->c3
-                    );
-                }
-                else {
-                    render_pl_nv12_src(
-                        ix, iy, nv12_src_cmd->bounding_left, nv12_src_cmd->bounding_top, nv12_src_cmd->bounding_left + nv12_src_cmd->width, nv12_src_cmd->bounding_top + nv12_src_cmd->height,
-                        (unsigned char*)nv12_src_cmd->d_src0, (unsigned char*)nv12_src_cmd->d_src1, context_color,
-                        pcommand->c0, pcommand->c1, pcommand->c2, pcommand->c3
-                    );
-                }
+                render_nv12_src(ix, iy, nv12_src_cmd, context_color);
                 break;
             }
         }
@@ -857,26 +930,6 @@ static __global__ void render_elements_kernel(
         return;
 
     BlendingPixel<format>::call(image0, image1, ix, iy, stride, context_color);
-}
-
-static __device__ void __forceinline__ yuv2rgb(
-    int y, int u, int v, uint8_t& r, uint8_t& g, uint8_t& b
-){
-    int iyval = 1220542*max(0, y - 16);
-    r = u8cast((iyval + 1673527*(v - 128)                      + (1 << 19)) >> 20);
-    g = u8cast((iyval - 852492*(v - 128) - 409993*(u - 128)    + (1 << 19)) >> 20);
-    b = u8cast((iyval                      + 2116026*(u - 128) + (1 << 19)) >> 20);
-}
-
-static __device__ void __forceinline__ rgb2yuv(
-    int r, int g, int b, uint8_t& y, uint8_t& u, uint8_t& v
-){
-    y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-    u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-    v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-    // y = u8cast(0.299f * r + 0.587f * g + 0.114f * b);
-    // u = u8cast(-0.1687f * r - 0.3313 * g + 0.5f * b + 128);
-    // v = u8cast(0.5f * r - 0.4187f * g - 0.0813f * b + 128);
 }
 
 template<ImageFormat format>
@@ -1029,7 +1082,7 @@ static __global__ void render_blur_kernel(
                 if(sx < 32 && sy < 32){
                     auto& pix = crop[sy][sx];
                     // *(uchar3*)((char*)image0 + fy * stride + fx * 3) = crop[sy][sx];
-                    save_pixel<format>(image0, image1, fx, fy, round_down2(sx), image_width, stride, pix.x, pix.y, pix.z);
+                    save_pixel<format>(image0, image1, fx, fy, round_down2(fx), image_width, stride, pix.x, pix.y, pix.z);
                 }
             }
         }

@@ -97,6 +97,15 @@ static __global__ void decode_kernel(unsigned int num, const half* reg, const ha
 
 class TransBBoxImplement : public TransBBox {
  public:
+  // "middle", "reg", "height", "dim", "rot", "vel", "score"
+  const char* BindingMiddle = "middle";  // input
+  const char* BindingReg    = "reg";     // output
+  const char* BindingHeight = "height";
+  const char* BindingDim    = "dim";
+  const char* BindingRot    = "rot";
+  const char* BindingVel    = "vel";
+  const char* BindingScore  = "score";
+
   virtual ~TransBBoxImplement() {
     for (size_t i = 0; i < bindings_.size(); ++i) checkRuntime(cudaFree(bindings_[i]));
 
@@ -126,11 +135,12 @@ class TransBBoxImplement : public TransBBox {
   }
 
   void create_binding_memory() {
-    for (int ibinding = 0; ibinding < engine_->num_bindings(); ++ibinding) {
-      if (engine_->is_input(ibinding)) continue;
+    const char* bindings[] = {BindingMiddle, BindingReg, BindingHeight, BindingDim, BindingRot, BindingVel, BindingScore};
+    for (size_t i = 0; i < sizeof(bindings) / sizeof(bindings[0]); ++i) {
+      if (engine_->is_input(bindings[i])) continue;
 
-      auto shape = engine_->static_dims(ibinding);
-      Asserts(engine_->dtype(ibinding) == TensorRT::DType::HALF, "Invalid binding data type.");
+      auto shape = engine_->static_dims(bindings[i]);
+      Asserts(engine_->dtype(bindings[i]) == TensorRT::DType::HALF, "Invalid binding data type.");
 
       size_t volumn = std::accumulate(shape.begin(), shape.end(), 1, std::multiplies<int>());
       half* pdata = nullptr;
@@ -147,9 +157,16 @@ class TransBBoxImplement : public TransBBox {
   virtual std::vector<BoundingBox> forward(const nvtype::half* transfusion_feature, float confidence_threshold, void* stream,
                                            bool sorted) override {
     cudaStream_t _stream = static_cast<cudaStream_t>(stream);
-    engine_->forward({/* input  */ transfusion_feature,
-                      /* output */ bindings_[0], bindings_[1], bindings_[2], bindings_[3], bindings_[4], bindings_[5]},
-                     _stream);
+
+    engine_->forward(std::unordered_map<std::string, const void *>{
+          {BindingMiddle, transfusion_feature}, 
+          {BindingReg, bindings_[0]},
+          {BindingHeight, bindings_[1]},
+          {BindingDim, bindings_[2]},
+          {BindingRot, bindings_[3]},
+          {BindingVel, bindings_[4]},
+          {BindingScore, bindings_[5]}
+        }, _stream);
     checkRuntime(cudaMemsetAsync(output_device_size_, 0, sizeof(unsigned int), _stream));
 
     cuda_linear_launch(decode_kernel, _stream, bindshape_[0][2], bindings_[0], bindings_[1], bindings_[2], bindings_[3],

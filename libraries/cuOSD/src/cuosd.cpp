@@ -111,12 +111,6 @@ static inline tuple<unsigned char, unsigned char, unsigned char> make_u83(unsign
     return tuple<unsigned char, unsigned char, unsigned char>(a, b, c);
 }
 
-static void rgb2yuv(unsigned char r, unsigned char g, unsigned char b, unsigned char& y, unsigned char& u, unsigned char& v) {
-    y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-    u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-    v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-}
-
 cuOSDContext_t cuosd_context_create() {
     return new cuOSDContextImpl();
 }
@@ -179,17 +173,82 @@ void cuosd_draw_text(
     font_size = context->text_backend->uniform_font_size(font_size);
     font_size = std::max(10, std::min(MAX_FONT_SIZE, font_size));
 
+    std::vector<shared_ptr<TextHostCommand>> commands;
     int xmargin = font_size * 0.5;
     int ymargin = font_size * 0.25;
+    int background_min_x = x;
+    int background_min_y = y;
+    int background_max_x = x;
+    int background_max_y = y;
+    bool need_background_fill = bg_color.a != 0;
+
+    auto precompute_line = [&](const std::vector<unsigned long>& line_words, const int ypos)->int{
+        int width, height, yoffset;
+        tie(width, height, yoffset) = context->text_backend->measure_text(line_words, font_size, font);
+
+        if (need_background_fill) {
+            background_max_x = std::max(x + width + 2 * xmargin - 1,     background_max_x);
+            background_max_y = std::max(ypos + height + 2 * ymargin - 1, background_max_y);
+        }
+        commands.emplace_back(make_shared<TextHostCommand>(line_words, font_size, font, x + xmargin, ypos + ymargin - yoffset, border_color.r, border_color.g, border_color.b, border_color.a));
+        return height;
+    };
+
+    bool need_split_lines = false;
+    for(size_t i = 0; i < words.size(); ++i){
+
+        // ignore the last charater \n
+        if((words[i] & 0xFF) == '\n'){
+            need_split_lines = true;
+        }
+    }
+    
+    if(!need_split_lines){
+        precompute_line(words, y);
+
+        // add rectangle cmd as background color if need to fill the background.
+        if(need_background_fill){
+            cuosd_draw_rectangle(_context, background_min_x, background_min_y, background_max_x, background_max_y, -1, bg_color);
+        }
+        context->commands.insert(context->commands.end(), commands.begin(), commands.end());
+        return;
+    }
+
+    // below needed to compute the special character \n height.
+    int line_text_y_pos = y;
+    size_t prev_break_pos = 0;
+    size_t icurrent_pos = 0;
 
     int width, height, yoffset;
-    tie(width, height, yoffset) = context->text_backend->measure_text(words, font_size, font);
+    tie(width, height, yoffset) = context->text_backend->measure_text(context->text_backend->split_utf8("a"), font_size, font);
+    int prev_break_line_height = height;
+    for(; icurrent_pos < words.size(); ++icurrent_pos){
 
-    // add rectangle cmd as background color
-    if (bg_color.a) {
-        cuosd_draw_rectangle(_context, x, y, x+width + 2 * xmargin - 1, y + height + 2 * ymargin - 1, -1, bg_color);
+        // ignore the last charater \n
+        if((words[icurrent_pos] & 0xFF) == '\n'){
+            if(icurrent_pos == prev_break_pos){
+                line_text_y_pos += prev_break_line_height;
+            }else{
+                std::vector<unsigned long> line(words.begin() + prev_break_pos, words.begin() + icurrent_pos);
+                int line_height = precompute_line(line, line_text_y_pos);
+                prev_break_line_height = line_height;
+                line_text_y_pos += line_height;
+            }
+            prev_break_pos = icurrent_pos + 1;
+        }
     }
-    context->commands.emplace_back(make_shared<TextHostCommand>(words, font_size, font, x + xmargin, y + ymargin - yoffset, border_color.r, border_color.g, border_color.b, border_color.a));
+
+    if(icurrent_pos > prev_break_pos){
+        std::vector<unsigned long> line(words.begin() + prev_break_pos, words.begin() + icurrent_pos);
+        precompute_line(line, line_text_y_pos);
+    }
+
+    if(!commands.empty()){
+        if(need_background_fill){
+            cuosd_draw_rectangle(_context, background_min_x, background_min_y, background_max_x, background_max_y, -1, bg_color);
+        }
+        context->commands.insert(context->commands.end(), commands.begin(), commands.end());
+    }
 }
 
 void cuosd_draw_clock(
@@ -392,6 +451,15 @@ void cuosd_draw_rotationbox(
     context->commands.emplace_back(cmd);
 }
 
+void cuosd_draw_ellipse(
+    cuOSDContext_t _context, int cx, int cy, int width, int height, float yaw, int thickness, cuOSDColor border_color, cuOSDColor bg_color
+) {
+    cuOSDContextImpl* context = (cuOSDContextImpl*)_context;
+    if (border_color.a == 0) return;
+    if (bg_color.a && thickness > 0) context->commands.emplace_back(make_shared<EllipseCommand>(cx, cy, width, height, yaw, -thickness, bg_color.r, bg_color.g, bg_color.b, bg_color.a));
+    context->commands.emplace_back(make_shared<EllipseCommand>(cx, cy, width, height, yaw, thickness, border_color.r, border_color.g, border_color.b, border_color.a));
+}
+
 void cuosd_draw_polyline(
     cuOSDContext_t _context, int* h_pts, int* d_pts, int n_pts, int thickness, bool is_closed, cuOSDColor border_color, bool interpolation, cuOSDColor fill_color
 ) {
@@ -592,15 +660,66 @@ void cuosd_draw_circle(
 }
 
 void cuosd_draw_rgba_source(
-    cuOSDContext_t _context, void* d_src, int cx, int cy, int w, int h) {
+    cuOSDContext_t _context, int left, int top, int right, int bottom, void* d_src, int src_width, int src_stride, int src_height) {
     cuOSDContextImpl* context = (cuOSDContextImpl*)_context;
-    context->commands.emplace_back(make_shared<RGBASourceCommand>(cx, cy, w, h, d_src));
+    int tl = min(left, right);
+    int tt = min(top, bottom);
+    int tr = max(left, right);
+    int tb = max(top, bottom);
+    left = tl; top = tt; right = tr; bottom = tb;
+
+    auto cmd = make_shared<RGBASourceCommand>();
+    auto width = right - left;
+    auto height = bottom - top;
+
+    cmd->d_src = d_src;
+    cmd->src_width = src_width;
+    cmd->src_stride = src_stride;
+    cmd->src_height = src_height;
+
+    cmd->scale_x = src_width / (width + 1e-5);
+    cmd->scale_y = src_height / (height + 1e-5);
+
+    cmd->bounding_left  = left;
+    cmd->bounding_right = right;
+    cmd->bounding_top   = top;
+    cmd->bounding_bottom = bottom;
+
+    context->commands.emplace_back(cmd);
 }
 
 void cuosd_draw_nv12_source(
-    cuOSDContext_t _context, void* d_src0, void* d_src1, int cx, int cy, int w, int h, cuOSDColor mask_color, bool block_linear) {
+    cuOSDContext_t _context, int left, int top, int right, int bottom, void* d_src0, void* d_src1, int src_width, int src_stride, int src_height, unsigned char alpha, bool block_linear) {
     cuOSDContextImpl* context = (cuOSDContextImpl*)_context;
-    context->commands.emplace_back(make_shared<NV12SourceCommand>(cx, cy, w, h, d_src0, d_src1, block_linear, mask_color.r, mask_color.g, mask_color.b, mask_color.a));
+    int tl = min(left, right);
+    int tt = min(top, bottom);
+    int tr = max(left, right);
+    int tb = max(top, bottom);
+    left = tl; top = tt; right = tr; bottom = tb;
+
+    auto cmd = make_shared<NV12SourceCommand>();
+    auto width = right - left;
+    auto height = bottom - top;
+
+    cmd->d_src0 = d_src0;
+    cmd->d_src1 = d_src1;
+
+    cmd->src_width = src_width;
+    cmd->src_stride = src_stride;
+    cmd->src_height = src_height;
+
+    cmd->scale_x = src_width / (width + 1e-5);
+    cmd->scale_y = src_height / (height + 1e-5);
+
+    cmd->block_linear = block_linear;
+    cmd->c3 = alpha;
+
+    cmd->bounding_left  = left;
+    cmd->bounding_right = right;
+    cmd->bounding_top   = top;
+    cmd->bounding_bottom = bottom;
+
+    context->commands.emplace_back(cmd);
 }
 
 //  elements:int = [num_element, e0 offset, e1 offset, e2 offset ,e3 offset, e offset.....]
@@ -744,11 +863,6 @@ void cuosd_apply(
     }
 
     if(!context->commands.empty()){
-        for (auto& cmd : context->commands) {
-            if (format == cuOSDImageFormat::BlockLinearNV12 || format == cuOSDImageFormat::PitchLinearNV12)
-                rgb2yuv(cmd->c0, cmd->c1, cmd->c2, cmd->c0, cmd->c1, cmd->c2);
-        }
-
         cuosd_text_perper(context, width, height, _stream);
 
         context->bounding_left   = width;
@@ -773,6 +887,8 @@ void cuosd_apply(
                 byte_of_commands += sizeof(RectangleCommand);
             else if (cmd->type == CommandType::Circle)
                 byte_of_commands += sizeof(CircleCommand);
+            else if (cmd->type == CommandType::Ellipse)
+                byte_of_commands += sizeof(EllipseCommand);
             else if (cmd->type == CommandType::Segment)
                 byte_of_commands += sizeof(SegmentCommand);
             else if (cmd->type == CommandType::PolyFill)
@@ -800,6 +916,8 @@ void cuosd_apply(
                 memcpy(pg_cmd, cmd.get(), sizeof(RectangleCommand));
             else if (cmd->type == CommandType::Circle)
                 memcpy(pg_cmd, cmd.get(), sizeof(CircleCommand));
+            else if (cmd->type == CommandType::Ellipse)
+                memcpy(pg_cmd, cmd.get(), sizeof(EllipseCommand));
             else if (cmd->type == CommandType::Segment)
                 memcpy(pg_cmd, cmd.get(), sizeof(SegmentCommand));
             else if (cmd->type == CommandType::PolyFill)

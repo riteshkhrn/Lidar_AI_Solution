@@ -2,6 +2,18 @@
 A tiny inference engine for [3d sparse convolutional networks](https://github.com/tianweiy/CenterPoint/blob/master/det3d/models/backbones/scn.py) using int8/fp16.
 ![title](/assets/3dsparse_conv.png)
 
+## News
+- (05/14/2025) The libspconv.so 1.2.1 is released now!
+  - Add support for cudaGraph. Better performance, Better stability.
+- (09/11/2024) The libspconv.so 1.1.10 is released now!
+  - Add SM90 support for H100 devices.
+  - Add a pre-fusion strategy to fix the multi-output bug.
+- (10/19/2023) The libspconv.so 1.1.1 is released now!
+  - Fix an issue with wrong indices for intermediate output.
+- (08/18/2023) The libspconv.so 1.1.0 is released now!
+  - Open sourced the onnx parser part. libprotobuf will be configured by yourself.
+  - Multiple outputs are supported.
+
 ## Model && Data
 This demo uses lidar data from [nuScenes Dataset](https://www.nuscenes.org/).
 Onnx model can be converted from checkpoint and config below using given script.
@@ -39,7 +51,7 @@ $ cp scn.nuscenes.onnx path/to/3DSparseConvolution/workspace/
 $ sudo apt-get install libprotobuf-dev
 $ cd path/to/3DSparseConvolution
 ->>>>>> modify main.cpp:80 to scn.nuscenes.onnx
-$ make fp16 -j
+$ CUDA_HOME=/usr/local/cuda SPCONV_USE_CUDAGRAPH=1 SPCONV_CUDA_VERSION=12.8 make fp16 -j
 🙌 Output.shape: 1 x 256 x 180 x 180
 [PASSED 🤗], libspconv version is 1.0.0
 To verify the results, you can execute the following command.
@@ -68,7 +80,7 @@ Torch: absmax:3.054688, min:0.000000, std:0.034600, mean:0.003279
 
 ## For Python
 ```
-$ make pyscn -j
+$ SPCONV_CUDA_VERSION=11.4 make pyscn -j
 Use Python Include: /usr/include/python3.8
 Use Python SO Name: python3.8
 Use Python Library: /usr/lib
@@ -86,11 +98,11 @@ To verify result:
 - Summary performance using 6019 data from nuscenes
 ![](workspace/perf.png)
 
-## Note
+## Notes
 - The current version supports compute arch are required sm_80, sm_86, and sm_87..
 - Supported operators:
   - SparseConvolution, Add, Relu, Add&Relu, ScatterDense, Reshape and ScatterDense&Transpose.
 - Supported SparseConvolution:
-  - SpatiallySparseConvolution and SubmanifoldSparseConvolution.
+  - SpatiallySparseConvolution, SparseInverseConvolution, and SubmanifoldSparseConvolution.
 - Supported properties of SparseConvolution:
   - activation, kernel_size, dilation, stride, padding, rulebook, subm, output_bound, precision and output_precision.

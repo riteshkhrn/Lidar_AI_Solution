@@ -19,6 +19,7 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
+CUDA_HOME :=/usr/local/cuda
 cc        := g++
 stdcpp    := c++17
 nvcc      := $(CUDA_HOME)/bin/nvcc -ccbin=$(cc)
@@ -57,10 +58,10 @@ include_paths := src              \
 ifeq ($(build_pango_backend), yes)
 include_paths += 				  \
 	/usr/include/			      \
-	/mnt2/ds_6_1_1/3rdparty/pango/1.38.1   \
-	/mnt2/ds_6_1_1/3rdparty/pango/1.38.1/pre-generated-headers/x86_64    \
-	/mnt2/ds_6_1_1/3rdparty/cairo/1.14.6/src							 \
-	/mnt2/ds_6_1_1/3rdparty/cairo/1.14.6/pre-generated-headers/x86_64	 \
+	/mnt/deepstream/3rdparty/pango/1.38.1   \
+	/mnt/deepstream/3rdparty/pango/1.38.1/pre-generated-headers/x86_64    \
+	/mnt/deepstream/3rdparty/cairo/1.16.0/src							 \
+	/mnt/deepstream/3rdparty/cairo/1.16.0/pre-generated-headers/x86_64	 \
 	/usr/include/glib-2.0												 \
 	/usr/lib/aarch64-linux-gnu/glib-2.0/include
 endif
@@ -84,8 +85,18 @@ cpp_compile_flags := -std=$(stdcpp) -g -O0 -fPIC -fopenmp -pthread $(cppdefine) 
 cu_compile_flags  := -std=$(stdcpp) -g -O0 -Xcompiler "$(cpp_compile_flags)"
 link_flags        := -pthread -fopenmp -Wl,-rpath='$$ORIGIN'
 
+# CUDA code generation flags
+GENCODE_SM53 := -gencode arch=compute_53,code=sm_53
+GENCODE_SM62 := -gencode arch=compute_62,code=sm_62
+GENCODE_SM72 := -gencode arch=compute_72,code=sm_72
+GENCODE_SM75 := -gencode arch=compute_75,code=sm_75
+GENCODE_SM86 := -gencode arch=compute_86,code=sm_86
+GENCODE_SM87 := -gencode arch=compute_87,code=sm_87
+GENCODE_SM_PTX := -gencode arch=compute_72,code=compute_72
+GENCODE_FLAGS := $(GENCODE_SM53) $(GENCODE_SM62) $(GENCODE_SM72) $(GENCODE_SM75) $(GENCODE_SM86) $(GENCODE_SM87) $(GENCODE_SM_PTX)
+
 cpp_compile_flags += $(include_paths)
-cu_compile_flags  += $(include_paths)
+cu_compile_flags  += $(include_paths) $(GENCODE_FLAGS)
 link_flags        += $(library_paths) $(link_librarys) $(run_paths)
 
 ifeq ($(MAKECMDGOALS), pycuosd)
@@ -107,7 +118,7 @@ endif
 
 all      : cuosd
 run      : cuosd
-	@./cuosd polyline
+	@./cuosd ellipse
 
 simple      : cuosd
 	@./cuosd simple
@@ -137,6 +148,10 @@ libcuosd.so : $(libcuosd_objs)
 	@echo Link $@
 	@$(cc) -fPIC -shared $^ -o $@ $(link_flags)
 
+libcuosd.a : $(libcuosd_objs)
+	@echo Link $@
+	ar rcs $@ $^
+
 objs/%.cpp.o : %.cpp
 	@echo Compile CXX $<
 	@mkdir -p $(dir $@)
@@ -158,7 +173,7 @@ objs/%.cu.mk : %.cu
 	@$(nvcc) -M $< -MF $@ -MT $(@:.cu.mk=.cu.o) $(cu_compile_flags)
 
 clean :
-	@rm -rf objs cuosd libcuosd.so test/cuosd/pycuosd.so
+	@rm -rf objs cuosd libcuosd.so libcuosd.a test/cuosd/pycuosd.so
 
 .PHONY : clean run cuosd pycuosd
 

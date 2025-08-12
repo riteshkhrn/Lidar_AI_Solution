@@ -20,7 +20,8 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  */
- 
+
+#include <stdint.h>
 #include <stdio.h>
 #include <fstream>
 #include <cuda_runtime.h>
@@ -160,11 +161,12 @@ namespace gpu{
     Polyline* create_polyline() {
         Polyline* output = new Polyline();
         std::vector<Point> points;
-        points.push_back(Point({ 100, 100 }));
-        points.push_back(Point({ 600, 100 }));
-        points.push_back(Point({ 350, 300 }));
-        points.push_back(Point({ 600, 500 }));
-        points.push_back(Point({ 300, 500 }));
+        // points.push_back(Point({ 100, 200 }));
+        // points.push_back(Point({ 600, 100 }));
+        // points.push_back(Point({ 350, 300 }));
+        // points.push_back(Point({ 600, 500 }));
+        // points.push_back(Point({ 300, 500 }));
+        points = {{ 20, 600 }, { 100, 100 }, {100, 300}, {90, 300}, {90, 320}, {150, 320}, {150, 300}, {130, 300}, {130, 100}, { 500, 20 }, { 600, 600 }};
 
         output->n_pts = points.size();
         output->h_pts = (int *)malloc(output->n_pts * 2 * sizeof(int));
@@ -404,7 +406,7 @@ namespace gpu{
         if (ix >= dst_w || iy >= dst_h) return;
 
         int nx = ix * nv12_w / (float)dst_w;
-        int ny = iy * nv12_h / (float)dst_w;
+        int ny = iy * nv12_h / (float)dst_h;
         unsigned char value_y = nv12_y [(ny + 0) * nv12_w + nx    ];
         unsigned char value_u = nv12_uv[(ny / 2) * nv12_w + round_down2(nx) + 0];
         unsigned char value_v = nv12_uv[(ny / 2) * nv12_w + round_down2(nx) + 1];

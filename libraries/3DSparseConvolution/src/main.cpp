@@ -36,6 +36,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "onnx-parser.hpp"
 #include "spconv/engine.hpp"
 #include "spconv/tensor.hpp"
 #include "spconv/timer.hpp"
@@ -52,7 +53,7 @@ struct Task {
   vector<int> grid_size;
   string name;
   string compare_cmd;
-  string save_dense;
+  vector<string> outputs;
   IndiceOrder order;
 };
 
@@ -65,31 +66,27 @@ Task load_task(const string& name, spconv::Precision precision) {
     task.indices = spconv::Tensor::load("bevfusion/infer.xyz.coors");
     task.grid_size = {1440, 1440, 41};
     task.order = IndiceOrder::XYZ;
-    task.save_dense = "bevfusion/output.xyz.dense";
+    task.outputs = {"bevfusion/output.xyz.dense"};
     task.compare_cmd =
-        "python tool/compare.py workspace/bevfusion/infer.xyz.dense "
-        "workspace/bevfusion/output.xyz.dense --detail";
+        "python tool/compare.py workspace/bevfusion/infer.xyz.dense workspace/bevfusion/output.xyz.dense --detail";
   } else if (name == "bevfusionZYX") {
     task.engine = spconv::load_engine_from_onnx("bevfusion/bevfusion.scn.zyx.onnx", precision);
     task.features = spconv::Tensor::load("bevfusion/infer.zyx.voxels");
     task.indices = spconv::Tensor::load("bevfusion/infer.zyx.coors");
     task.grid_size = {41, 1440, 1440};
     task.order = IndiceOrder::ZYX;
-    task.save_dense = "bevfusion/output.zyx.dense";
+    task.outputs = {"bevfusion/output.zyx.dense"};
     task.compare_cmd =
-        "python tool/compare.py workspace/bevfusion/infer.zyx.dense "
-        "workspace/bevfusion/output.zyx.dense --detail";
+        "python tool/compare.py workspace/bevfusion/infer.zyx.dense workspace/bevfusion/output.zyx.dense --detail";
   } else if (name == "centerpointZYX") {
     task.engine = spconv::load_engine_from_onnx("centerpoint/centerpoint.scn.PTQ.onnx", precision);
     task.features = spconv::Tensor::load("centerpoint/in_features.torch.fp16.tensor");
     task.indices = spconv::Tensor::load("centerpoint/in_indices_zyx.torch.int32.tensor");
     task.grid_size = {41, 1440, 1440};
     task.order = IndiceOrder::ZYX;
-    task.save_dense = "centerpoint/output.zyx.dense";
+    task.outputs = {"centerpoint/output.zyx.dense"};
     task.compare_cmd =
-        "python tool/compare.py workspace/centerpoint/out_dense.torch.fp16.tensor "
-        "workspace/centerpoint/output.zyx.dense "
-        "--detail";
+        "python tool/compare.py workspace/centerpoint/out_dense.torch.fp16.tensor workspace/centerpoint/output.zyx.dense --detail";
   } else {
     Assertf(false, "Unsupport task name: %s", name.c_str());
   }
@@ -100,115 +97,123 @@ void print_done(const string& cmd) {
   printf("[PASSED 🤗], libspconv version is %s\n", NVSPCONV_VERSION);
   printf(
       "To verify the results, you can execute the following command.\n"
-      "Verify Result:\n"
       "  %s\n",
       cmd.c_str());
 }
 
-void do_memory_usage_test(spconv::Precision precision) {
-  cudaStream_t stream;
-  checkRuntime(cudaStreamCreate(&stream));
+// void run_task(const std::string& task_name, spconv::Precision precision, cudaStream_t stream) {
+//   spconv::set_logger_level(spconv::LoggerLevel::Verb);
+//   auto task = load_task(task_name, precision);
+//   task.engine->input(0)->features().reference(task.features.ptr(), task.features.shape, spconv::DataType::Float16);
+//   task.engine->input(0)->indices().reference(task.indices.ptr(), task.indices.shape, spconv::DataType::Int32);
+//   task.engine->input(0)->set_grid_size(task.grid_size);
+//   task.engine->forward(stream);
 
-  spconv::set_verbose(true);
-  auto task = load_task("centerpointZYX", precision);
-  spconv::set_verbose(false);
+//   for(int i = 0; i < task.engine->num_output(); ++i){
+//     auto& out_features = task.engine->output(0)->features();
+//     printf("🙌 Output.shape: %s, Save to: %s\n", spconv::format_shape(out_features.shape), task.outputs[i].c_str());
+//     out_features.save(task.outputs[i].c_str(), stream);
+//   }
+//   task.engine.reset();
+//   print_done(task.compare_cmd);
+// }
 
-  auto forward = [&]() {
-    task.engine->forward(task.features.shape, spconv::DType::Float16, task.features.ptr(),
-                         task.indices.shape, spconv::DType::Int32, task.indices.ptr(), 1,
-                         {41, 1440, 1440}, stream);
-  };
+void run_task(const std::string& task_name, spconv::Precision precision, cudaStream_t stream) {
+  spconv::set_logger_level(spconv::LoggerLevel::Verb);
+  const char* precision_string = precision == spconv::Precision::Float16 ? "fp16" : "int8";
+  printf("Run task: %s:%s\n", task_name.c_str(), precision_string);
+  auto task = load_task(task_name, precision);
+  auto features = task.features.clone();
+  auto indices  = task.indices.clone();
+  features.memset(0, stream);
+  indices.memset(0, stream);
+  task.engine->input(0)->features().reference(features.ptr(), features.shape, features.dtype(), true);
+  task.engine->input(0)->indices().reference(indices.ptr(), indices.shape, indices.dtype(), true);
+  task.engine->input(0)->set_grid_size(task.grid_size);
 
-  // sudo cat /sys/kernel/debug/nvmap/iovmm/clients
-  int nwarmup = 10;
-  printf("☃️  Warmup. %d\n", nwarmup);
-  for (int i = 0; i < nwarmup; ++i) forward();
-
-  spconv::EventTimer timer;
-  while (true) {
-    timer.start(stream);
-    forward();
-    timer.stop("⏳");
+  bool use_cudagraph = false;
+  const char* spconv_use_cudagraph = getenv("SPCONV_USE_CUDAGRAPH");
+  if(spconv_use_cudagraph != nullptr && strcmp(spconv_use_cudagraph, "1") == 0){
+    use_cudagraph = true;
+    printf("Enable cudagraph because SPCONV_USE_CUDAGRAPH is set\n");
   }
 
+  const char* dds = getenv("SPCONV_USE_DDS");
+  if(use_cudagraph || (dds != nullptr && strcmp(dds, "1") == 0)){
+    uint32_t* num_inputs_pointer = nullptr;
+    uint32_t real_num_inputs = task.features.size(0);
+    checkRuntime(cudaMalloc(&num_inputs_pointer, sizeof(uint32_t)));
+    checkRuntime(cudaMemcpy(num_inputs_pointer, &real_num_inputs, sizeof(uint32_t) , cudaMemcpyHostToDevice));
+    task.engine->input(0)->set_dds_num_of_points_pointer(num_inputs_pointer);
+    printf("Set DDS num of points (%d) pointer to %p\n", real_num_inputs, num_inputs_pointer);
+  }
+
+  cudaGraph_t spconv_cuda_graph = nullptr;
+  cudaGraphExec_t spconv_cuda_graph_instance = nullptr;
+  if(use_cudagraph){
+    checkRuntime(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
+    task.engine->forward(stream);
+    checkRuntime(cudaStreamEndCapture(stream, &spconv_cuda_graph));
+    checkRuntime(cudaGraphInstantiate(&spconv_cuda_graph_instance, spconv_cuda_graph, nullptr, nullptr, 0));
+  }
+
+  checkRuntime(cudaMemcpyAsync(features.ptr(), task.features.ptr(), features.bytes(), cudaMemcpyDeviceToDevice, stream));
+  checkRuntime(cudaMemcpyAsync(indices.ptr(), task.indices.ptr(), indices.bytes(), cudaMemcpyDeviceToDevice, stream));
+
+  auto forward_func = [&](){
+    if(use_cudagraph){
+      checkRuntime(cudaGraphLaunch(spconv_cuda_graph_instance, stream));
+    }else{
+      task.engine->forward(stream);
+    }
+  };
+
+  const char* profile = getenv("PROFILE");
+  bool profiling = profile != nullptr && strcmp(profile, "1") == 0;
+  if(profiling){
+    spconv::set_logger_level(spconv::LoggerLevel::Error);
+    printf("Profiling task: %s:%s, warmup 10 times, iter 100 times\n", task_name.c_str(), precision_string);
+    spconv::EventTimer timer;
+    for(int i = 0; i < 100; ++i){
+      forward_func();
+    }
+    timer.start(stream);
+    for(int i = 0; i < 1000; ++i){
+      forward_func();
+    } 
+    printf("Profiling task: %s:%s, time: %f ms\n", task_name.c_str(), precision_string, timer.stop(nullptr, false) / 1000.0f);
+  }else{
+    forward_func();
+  }
+
+  if(!profiling){
+    for(int i = 0; i < task.engine->num_output(); ++i){
+      printf("Save output[%d] to %s\n", i, task.outputs[i].c_str());
+      task.engine->output(i)->features().save(task.outputs[i].c_str(), stream);
+    }
+  }
   task.engine.reset();
-  checkRuntime(cudaStreamDestroy(stream));
-}
 
-void do_simple_run(spconv::Precision precision) {
-  cudaStream_t stream;
-  cudaStreamCreate(&stream);
+  if(!profiling){
+    print_done(task.compare_cmd);
+  }
 
-  spconv::set_verbose(true);
-  auto task = load_task("centerpointZYX", precision);
-  // auto task = load_task("bevfusionZYX", precision);
-  // auto task = load_task("bevfusionXYZ", precision);
-
-  auto result = task.engine->forward(task.features.shape, spconv::DType::Float16,
-                                     task.features.ptr(), task.indices.shape, spconv::DType::Int32,
-                                     task.indices.ptr(), 1, task.grid_size, stream);
-  checkRuntime(cudaStreamSynchronize(stream));
-
-  auto out_features =
-      spconv::Tensor::from_data_reference(result->features_data(), result->features_shape(),
-                                          (spconv::DataType)result->features_dtype());
-  auto grid_size = result->grid_size();
-
-  printf("🙌 Output.shape: %s\n", spconv::format_shape(out_features.shape).c_str());
-  out_features.save(task.save_dense, stream);
-  task.engine.reset();
-
-  checkRuntime(cudaStreamDestroy(stream));
-  print_done(task.compare_cmd);
-}
-
-void do_e2e_run(spconv::Precision precision) {
-  cudaStream_t stream;
-  cudaStreamCreate(&stream);
-
-  // spconv::set_verbose(true);
-  spconv::EventTimer timer;
-  Voxelization voxelization;
-  auto task = load_task("centerpointZYX", precision);
-  // auto task = load_task("bevfusionXYZ", precision);
-  // auto task = load_task("bevfusionZYX", precision);
-  auto file = "ff9eff4389a740848f9a56ad749a4ae8.bin";
-  printf("Load %s\n", file);
-
-  // Currently, only point cloud features with input channel 5 are supported
-  auto pc = spconv::Tensor::load_from_raw(file, {-1, 5}, spconv::DataType::Float16);
-  timer.start(stream);
-  voxelization.generateVoxels(pc.ptr<half>(), pc.size(0), task.order, stream);
-  timer.stop("Voxelization");
-
-  half* features = nullptr;
-  unsigned int* indices = nullptr;
-  vector<int> grid_size;
-  int num_valid = voxelization.getOutput(&features, &indices, grid_size);
-
-  timer.start(stream);
-  auto result =
-      task.engine->forward({num_valid, 5}, spconv::DType::Float16, features, {num_valid, 4},
-                           spconv::DType::Int32, indices, 1, grid_size, stream);
-  timer.stop("SCNForward");
-  checkRuntime(cudaStreamSynchronize(stream));
-
-  auto out_features =
-      spconv::Tensor::from_data_reference(result->features_data(), result->features_shape(),
-                                          (spconv::DataType)result->features_dtype());
-  printf("🙌 Output.shape: %s\n", spconv::format_shape(out_features.shape).c_str());
-
-  task.engine.reset();
-  checkRuntime(cudaStreamDestroy(stream));
+  if(use_cudagraph){
+    checkRuntime(cudaGraphDestroy(spconv_cuda_graph));
+    checkRuntime(cudaGraphExecDestroy(spconv_cuda_graph_instance));
+  }
 }
 
 int main(int argc, char** argv) {
   const char* cmd = "fp16";
+  const char* task_name = "centerpointZYX";
   if (argc > 1) cmd = argv[1];
+  if (argc > 2) task_name = argv[2];
 
-  if (strcmp(cmd, "memint8") == 0) do_memory_usage_test(spconv::Precision::Int8);
-  if (strcmp(cmd, "memfp16") == 0) do_memory_usage_test(spconv::Precision::Float16);
-  if (strcmp(cmd, "int8") == 0) do_simple_run(spconv::Precision::Int8);
-  if (strcmp(cmd, "fp16") == 0) do_simple_run(spconv::Precision::Float16);
+  cudaStream_t stream = nullptr;
+  checkRuntime(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
+  if (strcmp(cmd, "int8") == 0) run_task(task_name, spconv::Precision::Int8, stream);
+  if (strcmp(cmd, "fp16") == 0) run_task(task_name, spconv::Precision::Float16, stream);
+  checkRuntime(cudaStreamDestroy(stream));
   return 0;
 }

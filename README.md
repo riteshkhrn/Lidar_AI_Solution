@@ -48,6 +48,14 @@ CUDA & TensorRT solution for [pointpillars](https://arxiv.org/abs/1812.05784) in
 - **Postprocess**: Parse bounding box, class type and direction
 - **Easy To Use**: Preparation, inference, evaluation all in one to reproduce torch Impl accuracy.
 
+## CUDA-V2XFusion
+Training and inference solutions for V2XFusion.
+- **Easy To Use**: Provides easily reproducible solutions for training, quantization, and ONNX export.
+- **Quantification friendly**：PointPillars based backbone with pre-normalization which can reduce quantization error.
+- **Feature Fusion**: Camera & Lidar feature fuser and onnx export solution.
+- **PTQ**: Quantization solutions for V2XFusion, easy to understand.
+- **Sparsity**: 4:2 structural sparsity support. 
+- **Deepstream sample**: Sample inference using CUDA, TensorRT/Triton in NVIDIA DeepStream SDK 7.0.
 
 ## cuOSD(CUDA On-Screen Display Library)
 Draw all elements using a single CUDA kernel.
@@ -61,7 +69,7 @@ Draw all elements using a single CUDA kernel.
 - **Clock:** Time plotting based on text support
 
 ## cuPCL(CUDA Point Cloud Library)
-Provide several GPU accelerated Point Cloud operations with high accuracy and high perfomrance at the same time: cuICP, cuFilter, cuSegmentation, cuOctree, cuCluster, cuNDT, Voxelization(incoming).
+Provide several GPU accelerated Point Cloud operations with high accuracy and high performance at the same time: cuICP, cuFilter, cuSegmentation, cuOctree, cuCluster, cuNDT, Voxelization(incoming).
 - **cuICP:** CUDA accelerated iterative corresponding point vertex cloud(point-to-point) registration implementation.
 - **cuFilter:** Support CUDA accelerated features: PassThrough and VoxelGrid.
 - **cuSegmentation:** Support CUDA accelerated features: RandomSampleConsensus with a plane model.
@@ -89,6 +97,33 @@ YUV to RGB conversion. Combine Resize/Padding/Conversion/Normalization into a si
     - **CHW_RGB/BGR**
     - **HWC_RGB/BGR**
     - **CHW16/32/4/RGB/BGR for DLA input**
+- Supported Features:
+    - **Resize**
+    - **Padding**
+    - **Conversion**
+    - **Normalization**
+
+## ROI Conversion (ROIs To Continuous Tensor Conversion)
+Combine Resize/Padding/Conversion/Normalization into a single kernel function.
+- **Most of the time, it can be bit-aligned with OpenCV.**
+    - It will give an exact result when the scaling factor is a rational number.
+    - Better performance is usually achieved when the stride can divide by 4.
+- Supported Input Format:
+    - **NV12BlockLinear**
+    - **NV12PitchLinear**
+    - **YUV422Packed_YUYV**
+- Supported Interpolation methods:
+    - **Nearest**
+    - **Bilinear**
+- Supported Output Data Type:
+    - **Uint8**
+    - **Float32**
+    - **Float16**
+- Supported Output Layout:
+    - **CHW_RGB/BGR**
+    - **HWC_RGB/BGR**
+    - **CHW16/32/4/RGB/BGR for DLA input**
+    - **Gray**
 - Supported Features:
     - **Resize**
     - **Padding**
