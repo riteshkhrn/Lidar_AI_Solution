@@ -53,9 +53,9 @@ __global__ void add_relu_kernel<half, int8_t>(
 
 SparseFusedAddRelu::SparseFusedAddRelu(std::string input_name_0,
                                        std::string input_name_1,
-                                       std::string input_precision,
+                                       spconv::Precision input_precision,
                                        std::string output_name,
-                                       std::string output_precision,
+                                       spconv::Precision output_precision,
                                        int output_bound, int out_channels)
     : input_name_1_(input_name_0),
       input_name_2_(input_name_1),
@@ -64,21 +64,6 @@ SparseFusedAddRelu::SparseFusedAddRelu(std::string input_name_0,
       output_precision_(output_precision),
       output_bound_(output_bound),
       out_channels_(out_channels) {
-  // TODO: do some checks
-  THROW_COND_EXCEPTION(
-      std::runtime_error,
-      (input_precision_ == "int8" || input_precision_ == "fp16"),
-      "The input precision", input_precision_,
-      "is not valid, the supported choices are int8 or fp16");
-  THROW_COND_EXCEPTION(
-      std::runtime_error,
-      (output_precision_ == "int8" || output_precision_ == "fp16"),
-      "The output precision", output_precision_,
-      "is not valid, the supported choices are int8 or fp16");
-  // THROW_COND_EXCEPTION(std::runtime_error,
-  //                      (input_precision_ == output_precision_),
-  //                      "The I/O precision is different",
-  //                      input_precision_, output_precision_);
   // allocate the maximum size
   auto output_size = output_bound_ * out_channels_ * sizeof(half);
   checkRuntime(cudaMalloc(&output_, output_size));
@@ -91,37 +76,39 @@ SparseFusedAddRelu::~SparseFusedAddRelu() {
   if (output_) checkRuntime(cudaFree(output_));
 }
 
-void SparseFusedAddRelu::set_precision(
+void SparseFusedAddRelu::configure(
     spconv::Precision precision,
-    std::unordered_map<std::string, float>& tensor_name_to_scale) {
+    std::unordered_map<std::string, float>& tensor_name_to_scale,
+    std::unordered_map<std::string, std::shared_ptr<void>> parameters) {
   // should do int8 inference
   int8_inference_ = precision == spconv::Precision::Int8;
-  int8_inference_ = int8_inference_ && !(input_precision_ == "fp16" &&
-                                         output_precision_ == "fp16");
+  int8_inference_ = 
+      int8_inference_ && !(input_precision_ == spconv::Precision::Float16 &&
+                           output_precision_ == spconv::Precision::Float16);
   LOG("Doing int8 inference", int8_inference_);
-  if (!int8_inference_ && output_precision_ == "int8") {
+  if (!int8_inference_ && output_precision_ == spconv::Precision::Int8) {
     LOG("Ignoring node output precisions ", output_precision_,
         "cause model precision is not int8 reset it to fp16");
   }
-  if (!int8_inference_ && input_precision_ == "int8") {
+  if (!int8_inference_ && input_precision_ == spconv::Precision::Int8) {
     LOG("Ignoring node input precisions", input_precision_,
         "cause model precision is not int8 reset it to fp16");
   }
   // if not int8 nothing to do more
   if (!int8_inference_) return;
   auto input_1_scale_iterator = tensor_name_to_scale.find(input_name_1_);
-  THROW_COND_EXCEPTION(std::out_of_range,
-                       (input_1_scale_iterator != tensor_name_to_scale.end()),
+  THROW_COND_EXCEPTION((input_1_scale_iterator != tensor_name_to_scale.end()),
+                       std::out_of_range,
                        input_name_1_, "scale not found");
   input_scale_1_ = input_1_scale_iterator->second;
   auto input_2_scale_iterator = tensor_name_to_scale.find(input_name_2_);
-  THROW_COND_EXCEPTION(std::out_of_range,
-                       (input_2_scale_iterator != tensor_name_to_scale.end()),
+  THROW_COND_EXCEPTION((input_2_scale_iterator != tensor_name_to_scale.end()),
+                       std::out_of_range,
                        input_name_2_, "scale not found");
   input_scale_2_ = input_2_scale_iterator->second;
   auto output_scale_iterator = tensor_name_to_scale.find(output_name_);
-  THROW_COND_EXCEPTION(std::out_of_range,
-                       (output_scale_iterator != tensor_name_to_scale.end()),
+  THROW_COND_EXCEPTION((output_scale_iterator != tensor_name_to_scale.end()),
+                       std::out_of_range,                       
                        output_name_, "scale not found");
   output_scale_ = output_scale_iterator->second;
   // input_scale_2_ = input_scale_1_;
@@ -130,51 +117,59 @@ void SparseFusedAddRelu::set_precision(
 }
 
 void SparseFusedAddRelu::forward(
-    std::unordered_map<std::string, std::shared_ptr<spconv::DTensor>>& io_dict,
+    std::unordered_map<std::string, std::shared_ptr<spconv::SparseDTensor>> &io_dict,
     void* stream) {
   // find the inputs
   auto input_1_iterator = io_dict.find(input_name_1_);
-  THROW_COND_EXCEPTION(std::out_of_range, (input_1_iterator != io_dict.end()),
+  THROW_COND_EXCEPTION((input_1_iterator != io_dict.end()), std::out_of_range, 
                        input_name_1_, "input not found");
   auto input1 = input_1_iterator->second;
   auto input_2_iterator = io_dict.find(input_name_2_);
-  THROW_COND_EXCEPTION(std::out_of_range, (input_2_iterator != io_dict.end()),
+  THROW_COND_EXCEPTION((input_2_iterator != io_dict.end()), std::out_of_range, 
                        input_name_2_, "input not found");
   auto input2 = input_2_iterator->second;
-  assert(input1->features_shape() == input2->features_shape());
+  assert(input1->features().shape == input2->features().shape);
 
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
-  auto output_dtype = input1->features_dtype();
-  auto input_shape = input1->features_shape();
+  auto output_dtype = input1->features().dtype();
+  auto input_shape = input1->features().shape;
   int64_t num_indices = std::accumulate(input_shape.begin(), input_shape.end(),
                                         int64_t(1), std::multiplies<int64_t>());
   if (int8_inference_) {
-    if (input_precision_ == "int8" && output_precision_ == "int8") {
+    if (input_precision_ == spconv::Precision::Int8 && 
+        output_precision_ == spconv::Precision::Int8) {
       cuda_linear_launch(
           add_relu_kernel, _stream, num_indices,
-          reinterpret_cast<int8_t*>(input1->features_data()), input_scale_1_,
-          reinterpret_cast<int8_t*>(input2->features_data()), input_scale_2_,
+          reinterpret_cast<int8_t*>(input1->features().ptr()), input_scale_1_,
+          reinterpret_cast<int8_t*>(input2->features().ptr()), input_scale_2_,
           reinterpret_cast<int8_t*>(output_), output_scale_);
-    } else if (input_precision_ == "fp16" && output_precision_ == "int8") {
+    } else if (input_precision_ == spconv::Precision::Float16 && 
+                output_precision_ == spconv::Precision::Int8) {
       cuda_linear_launch(
           add_relu_kernel, _stream, num_indices,
-          reinterpret_cast<half*>(input1->features_data()), input_scale_1_,
-          reinterpret_cast<half*>(input2->features_data()), input_scale_2_,
+          reinterpret_cast<half*>(input1->features().ptr()), input_scale_1_,
+          reinterpret_cast<half*>(input2->features().ptr()), input_scale_2_,
           reinterpret_cast<int8_t*>(output_), output_scale_);
     } else {
       // throw error
     }
-    output_dtype = spconv::DType::Int8;
+    output_dtype = spconv::DataType::Int8;
   } else {
     cuda_linear_launch(
         add_relu_kernel, _stream, num_indices,
-        reinterpret_cast<half*>(input1->features_data()), input_scale_1_,
-        reinterpret_cast<half*>(input2->features_data()), input_scale_2_,
+        reinterpret_cast<half*>(input1->features().ptr()), input_scale_1_,
+        reinterpret_cast<half*>(input2->features().ptr()), input_scale_2_,
         reinterpret_cast<half*>(output_), output_scale_);
   }
 
-  io_dict[output_name_] = std::make_shared<spconv::DTensorImplement>(
-      input1->features_shape(), output_dtype, (void*)output_,
-      input1->indices_shape(), input1->indices_dtype(), input1->indices_data(),
-      input1->grid_size(), input1->device());
+//  auto out = std::make_shared<spconv::SparseDTensorImplement>(output_name_);
+  auto output_iterator = io_dict.find(output_name_);
+  THROW_COND_EXCEPTION((output_iterator != io_dict.end()), std::out_of_range, 
+                           "cannot find output in io_dict", output_name_);
+  auto out = output_iterator->second;
+  out->features().reference((void*)output_, input1->features().shape, output_dtype);
+  out->indices().reference(input1->indices().ptr(), input1->indices().shape, input1->indices().dtype());
+  out->set_grid_size(input1->grid_size());
+  // out->set_device(input1->device());
+  // io_dict[output_name_] = out ;
 }

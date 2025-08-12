@@ -30,6 +30,8 @@
 #include <fstream>
 #include <memory>
 #include <numeric>
+
+#include "onnx-parser.hpp"
 #include <spconv/engine.hpp>
 #include <spconv/memory.hpp>
 #include <spconv/tensor.hpp>
@@ -71,24 +73,22 @@ class SCNModel {
 
     int num = features.shape(0);
     int ndim = features.shape(1);
-    features_.alloc_or_resize_to(num * ndim);
-    indices_.alloc_or_resize_to(num * 4);
-
     cudaStream_t stream = (cudaStream_t)stream_;
+    features_.alloc_or_resize_to(num * ndim, stream);
+    indices_.alloc_or_resize_to(num * 4, stream);
+
     checkRuntime(cudaMemcpyAsync(features_.ptr(), features.data(0), features_.bytes(),
                                  cudaMemcpyHostToDevice, stream));
     checkRuntime(cudaMemcpyAsync(indices_.ptr(), indices.data(0), indices_.bytes(),
                                  cudaMemcpyHostToDevice, stream));
 
-    auto result = instance_->forward({num, ndim}, spconv::DType::Float16, features_.ptr(), {num, 4},
-                                     spconv::DType::Int32, indices_.ptr(), 1, grid_size, stream);
-
-    spconv::Tensor out_features =
-        spconv::Tensor::from_data_reference(result->features_data(), result->features_shape(),
-                                            (spconv::DataType)result->features_dtype());
-    spconv::Tensor out_indices = spconv::Tensor::from_data_reference(
-        result->indices_data(), result->indices_shape(), (spconv::DataType)result->indices_dtype());
-
+    instance_->input(0)->features().reference(features_.ptr(), {num, ndim}, spconv::DataType::Float16);
+    instance_->input(0)->indices().reference(indices_.ptr(), {num, 4}, spconv::DataType::Int32);
+    instance_->input(0)->set_grid_size(grid_size);
+    instance_->forward(stream);
+    auto result = instance_->output(0);
+    auto out_features = result->features();
+    auto out_indices = result->indices();
     if (output_features_bytes_ < out_features.bytes()) {
       if (output_features_) checkRuntime(cudaFreeHost(output_features_));
       output_features_bytes_ = out_features.bytes();

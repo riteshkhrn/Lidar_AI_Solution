@@ -1,29 +1,29 @@
 #include "sparseConvImplicit.h"
 
-tv::DType convert_to_tv_datatype(spconv::DType spconvType) {
+tv::DType convert_to_tv_datatype(spconv::DataType spconvType) {
   switch (spconvType) {
-    case spconv::DType::Int32:
+    case spconv::DataType::Int32:
       return tv::int32;
-    case spconv::DType::Float16:
+    case spconv::DataType::Float16:
       return tv::float16;
-    case spconv::DType::Int8:
+    case spconv::DataType::Int8:
       return tv::int8;
     default:
       THROW_EXCEPTION(
           std::runtime_error, "The case of tv Data type",
-          static_cast<std::underlying_type_t<spconv::DType>>(spconvType),
+          static_cast<std::underlying_type_t<spconv::DataType>>(spconvType),
           "is not handled");
   }
 }
 
-spconv::DType convert_to_spconv_datatype(tv::DType tvType) {
+spconv::DataType convert_to_spconv_datatype(tv::DType tvType) {
   switch (tvType) {
     case tv::int32:
-      return spconv::DType::Int32;
+      return spconv::DataType::Int32;
     case tv::float16:
-      return spconv::DType::Float16;
+      return spconv::DataType::Float16;
     case tv::int8:
-      return spconv::DType::Int8;
+      return spconv::DataType::Int8;
     default:
       THROW_EXCEPTION(std::runtime_error, "The case of tv Data type",
                       static_cast<std::underlying_type_t<tv::DType>>(tvType),
@@ -37,17 +37,49 @@ static __device__ int quantize(float inp, float scale) {
   return clamp(__float2int_rn(inp / scale), -128, 127);
 }
 
+
+std::vector<int> get_conv_output_size(std::vector<int> input_size,
+                                      std::vector<int> kernel_size,
+                                      std::vector<int> stride,
+                                      std::vector<int> padding,
+                                      std::vector<int> dilation) {
+    std::vector<int> output_size;
+    for(int i = 0; i < input_size.size(); i++) {
+        int size = ((input_size[i] + 2 * padding[i] - dilation[i] * (kernel_size[i] - 1) - 1) / stride[i]) + 1;
+        if (kernel_size[i] == -1) {
+            output_size.push_back(1);
+        }
+        else {
+            output_size.push_back(size);
+        }
+    }
+    return output_size;
+}
+
+// std::vector<int> get_deconv_output_size(std::vector<int> input_size,std::vector<int> kernel_size,
+//                          std::vector<int> stride,std::vector<int> padding,
+//                          std::vector<int> dilation,std::vector<int> output_padding){
+//     ndim = len(input_size)
+//     output_size: List[int] = []
+//     for i in range(ndim):
+//         if kernel_size[i] == -1:
+//             raise ValueError("deconv don't support kernel_size < 0")
+//         size = (input_size[i] - 1) * stride[i] - 2 * padding[i] + kernel_size[i] + output_padding[i]
+//         output_size.append(size)
+//     return output_size
+//     }
+
 SparseConvolution::SparseConvolution(
-    std::string input_name, std::string input_precision,
-    std::string output_name, std::string output_precision, void* weights,
-    std::vector<int> weight_shape, void* bias, std::vector<int> bias_shape,
+    std::string input_name, spconv::Precision input_precision,
+    std::string output_name, spconv::Precision output_precision, const void* weight,
+    std::vector<int> weight_shape, const void* bias, std::vector<int> bias_shape,
     int ndim, std::vector<int> input_spatial_shape,
     std::vector<int> output_spatial_shape, int in_channels, int out_channels,
     std::vector<int> kernel_size, int output_bound, std::vector<int> stride,
     std::vector<int> dilation, std::vector<int> padding, int transposed,
     int inverse_, std::vector<int> output_padding, int groups, int subm,
-    std::string rulebook, std::string activation, std::vector<int> input_shape,
-    std::vector<int> output_shape, float input_dynamic_range,
+    std::string rulebook, std::string activation, std::vector<int64_t> input_shape,
+    std::vector<int64_t> output_shape, float input_dynamic_range,
     std::vector<float> weight_dynamic_range)
     : input_name_(input_name),
       input_precision_(input_precision),
@@ -75,19 +107,8 @@ SparseConvolution::SparseConvolution(
       input_dynamic_range_(input_dynamic_range),
       weight_dynamic_range_(weight_dynamic_range) {
   // TODO: do some checks
-  THROW_COND_EXCEPTION(
-      std::runtime_error,
-      (input_precision_ == "int8" || input_precision_ == "fp16"),
-      "The input precision", input_precision_,
-      "is not valid, the supported choices are int8 or fp16");
-  THROW_COND_EXCEPTION(
-      std::runtime_error,
-      (output_precision_ == "int8" || output_precision_ == "fp16"),
-      "The output precision", output_precision_,
-      "is not valid, the supported choices are int8 or fp16");
-  // output_bound_ = 100000;
   // weight layout is KRSC, [out channels, *kernel_size, in channels]
-  weights_ = tv::from_blob(weights, weight_shape, tv::float16, -1).to(0);
+  weight_ = tv::from_blob(weight, weight_shape, tv::float16, -1).to(0);
   bias_ = tv::from_blob(bias, bias_shape, tv::float16, -1).to(0);
   // get_compute_capability is very slow, don't forget to cache arch result.
   arch_ = ConvGemmOps::get_compute_capability();
@@ -183,60 +204,61 @@ SparseConvolution::~SparseConvolution() {
   if (conv_tuner_) delete conv_tuner_;
 }
 
-void SparseConvolution::set_precision(
+void SparseConvolution::configure(
     spconv::Precision precision,
-    std::unordered_map<std::string, float>& tensor_name_to_scale) {
+    std::unordered_map<std::string, float>& tensor_name_to_scale,
+    std::unordered_map<std::string, std::shared_ptr<void>> parameters) {
   output_scale_ = 1.0;
   input_scale_ = 1.0;
   // should do int8 inference
   int8_inference_ = precision == spconv::Precision::Int8;
-  int8_inference_ = int8_inference_ && !(input_precision_ == "fp16" &&
-                                         output_precision_ == "fp16");
+  int8_inference_ = 
+    int8_inference_ && !(input_precision_ == spconv::Precision::Float16 && 
+                          output_precision_ == spconv::Precision::Float16);
   LOG("Doing int8 inference", int8_inference_);
-  if (!int8_inference_ && output_precision_ == "int8") {
+  if (!int8_inference_ && output_precision_ == spconv::Precision::Int8) {
     LOG("Ignoring node output precisions ", output_precision_,
         "cause model precision is not int8 reset it to fp16");
   }
-  if (!int8_inference_ && input_precision_ == "int8") {
+  if (!int8_inference_ && input_precision_ == spconv::Precision::Int8) {
     LOG("Ignoring node input precisions", input_precision_,
         "cause model precision is not int8 reset it to fp16");
   }
   output_dtype_ = int8_inference_
-                      ? output_precision_ == "int8" ? tv::int8 : tv::float16
+                      ? output_precision_ == spconv::Precision::Int8 ? tv::int8 : tv::float16
                       : tv::float16;
   out_features_ = tv::empty(
       {subm_ ? static_num_act_in_ : out_inds_num_limit_, out_channels_},
       output_dtype_, 0);
   // if not int8 nothing to do more
   if (!int8_inference_) return;
-  // if int8 need to initialize weights, bias, scale
+  // if int8 need to initialize weight, bias, scale
   // input_dynamic_range and weight_dynamic_range are the QAMAX
   // refer
   // https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/blob/master/CUDA-BEVFusion/qat/lean/exptool.py#L179
   // https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#intro-quantization
-  if (output_precision_ == "int8") {
+  if (output_precision_ == spconv::Precision::Int8) {
     auto output_scale_iterator = tensor_name_to_scale.find(output_name_);
-    THROW_COND_EXCEPTION(std::out_of_range,
-                         (output_scale_iterator != tensor_name_to_scale.end()),
+    THROW_COND_EXCEPTION((output_scale_iterator != tensor_name_to_scale.end()),
+                         std::out_of_range,
                          output_name_, "scale not found");
     output_scale_ = output_scale_iterator->second;
   }
   auto input_scale_iterator = tensor_name_to_scale.find(input_name_);
-  THROW_COND_EXCEPTION(std::out_of_range,
-                       (input_scale_iterator != tensor_name_to_scale.end()),
+  THROW_COND_EXCEPTION((input_scale_iterator != tensor_name_to_scale.end()),
+                       std::out_of_range,
                        input_name_, "scale not found");
   input_scale_ = input_scale_iterator->second;
   // LOG("input scale", input_scale_, "output scale", output_scale_);
-  std::vector<int> weights_scale_shape{(int)weight_dynamic_range_.size()};
-  // weights_scale_shape.push_back(weight_dynamic_range_.size());
-  auto weights_scale = tv::from_blob(weight_dynamic_range_.data(),
-                                     weights_scale_shape, tv::float32, -1)
-                           .to(0);
-  auto bias_fp32 = tv::empty(weights_scale_shape, tv::float32, 0);
-  scale_ = tv::empty(weights_scale_shape, tv::float32, 0);
-  // tv::ssprint("Weights scale ", weights_scale.shape(), " scale ",
+  std::vector<int> weight_scale_shape{(int)weight_dynamic_range_.size()};
+  // weight_scale_shape.push_back(weight_dynamic_range_.size());
+  auto weight_scale = tv::from_blob(weight_dynamic_range_.data(),
+                                     weight_scale_shape, tv::float32, -1).to(0);
+  auto bias_fp32 = tv::empty(weight_scale_shape, tv::float32, 0);
+  scale_ = tv::empty(weight_scale_shape, tv::float32, 0);
+  // tv::ssprint("Weights scale ", weight_scale.shape(), " scale ",
   // scale_.shape());
-  auto weights_scale_ptr = weights_scale.data_ptr<float>();
+  auto weight_scale_ptr = weight_scale.data_ptr<float>();
   auto scale_ptr = scale_.data_ptr<float>();
   auto bias_fp32_ptr = bias_fp32.data_ptr<float>();
   auto bias_ptr = bias_.data_ptr<__half>();
@@ -245,32 +267,32 @@ void SparseConvolution::set_precision(
   tv::kernel_1d_map_cuda(
       0, weight_dynamic_range_.size(),
       [=] TV_GPU_LAMBDA_DEVICE(size_t i) mutable {
-        weights_scale_ptr[i] = weights_scale_ptr[i] / 127;
+        weight_scale_ptr[i] = weight_scale_ptr[i] / 127;
         // https://github.com/traveller59/spconv/blob/master/docs/TENSORRT_INT8_GUIDE.md
-        scale_ptr[i] = (weights_scale_ptr[i] * input_scale) / output_scale;
+        scale_ptr[i] = (weight_scale_ptr[i] * input_scale) / output_scale;
         bias_fp32_ptr[i] = __half2float(bias_ptr[i]) / output_scale;
       });
   bias_ = bias_fp32;
 
-  auto weight_shape_iter = weights_.shape().begin();
+  auto weight_shape_iter = weight_.shape().begin();
   int weight_shape_0 = *weight_shape_iter;
   std::advance(weight_shape_iter, 1);
   int64_t weight_volume =
-      std::accumulate(weight_shape_iter, weights_.shape().end(), int64_t(1),
+      std::accumulate(weight_shape_iter, weight_.shape().end(), int64_t(1),
                       std::multiplies<int64_t>());
-  auto weights_int8 = tv::empty(weights_.shape(), tv::int8, 0);
-  auto weights_int8_ptr = weights_int8.data_ptr<int8_t>();
-  auto weights_ptr = weights_.data_ptr<__half>();
+  auto weight_int8 = tv::empty(weight_.shape(), tv::int8, 0);
+  auto weight_int8_ptr = weight_int8.data_ptr<int8_t>();
+  auto weight_ptr = weight_.data_ptr<__half>();
   tv::kernel_1d_map_cuda(
       0, weight_shape_0, [=] TV_GPU_LAMBDA_DEVICE(size_t i) mutable {
         for (int j = 0; j < weight_volume; j++) {
           int index = j + weight_volume * (i);
-          weights_int8_ptr[index] =
-              quantize(__half2float(weights_ptr[index]), weights_scale_ptr[i]);
+          weight_int8_ptr[index] =
+              quantize(__half2float(weight_ptr[index]), weight_scale_ptr[i]);
         }
       });
-  weights_ = weights_int8;
-  // auto indices_cpu = weights_.cpu();
+  weight_ = weight_int8;
+  // auto indices_cpu = weight_.cpu();
   // auto indices_cpu_data_ptr = indices_cpu.data_ptr<int8_t>();
   // for (int i = 0; i < 20; ++i) {
   //   auto cur_indices_cpu_data_ptr = indices_cpu_data_ptr + i * 4;
@@ -282,7 +304,7 @@ void SparseConvolution::set_precision(
 }
 
 void SparseConvolution::forward(
-    std::unordered_map<std::string, std::shared_ptr<spconv::DTensor>>& io_dict,
+    std::unordered_map<std::string, std::shared_ptr<spconv::SparseDTensor>>& io_dict,
     void* stream) {
   float output_scale = output_scale_;
   float input_scale = input_scale_;
@@ -291,22 +313,23 @@ void SparseConvolution::forward(
   if (activation_ == "ReLU") act_type = tv::gemm::Activation::kReLU;
   // get feature tensor
   auto input_iterator = io_dict.find(input_name_);
-  THROW_COND_EXCEPTION(std::out_of_range, (input_iterator != io_dict.end()),
+  THROW_COND_EXCEPTION((input_iterator != io_dict.end()), std::out_of_range, 
                        input_name_, "input not found");
   auto input = input_iterator->second;
   auto input_dtype = int8_inference_
-                         ? input_precision_ == "int8" ? tv::int8 : tv::float16
+                         ? input_precision_ == spconv::Precision::Int8 ? tv::int8 : tv::float16
                          : tv::float16;
-  auto tv_dtype = convert_to_tv_datatype(input->features_dtype());
+  auto tv_dtype = convert_to_tv_datatype(input->features().dtype());
   // tv::ssprint(int8_inference_, input_precision_, input_dtype, tv_dtype);
-  THROW_COND_EXCEPTION(std::runtime_error, (input_dtype == tv_dtype),
+  THROW_COND_EXCEPTION((input_dtype == tv_dtype), std::runtime_error, 
                        "Invalid input type");
   tv::Tensor input_features = tv::Tensor(
-      input->features_data(), input->features_shape(), input_dtype, 0);
-  if (int8_inference_ && input_precision_ == "fp16") {
+      input->features().ptr(), input->features().shape, tv_dtype, 0);
+  // TODO: see if we can find an algorithim that does this
+  if (int8_inference_ && input_precision_ == spconv::Precision::Float16) {
     LOG("Converting input from fp16 to int8");
     tv::Tensor input_features_int8 =
-        tv::empty(input->features_shape(), tv::int8, 0);
+        tv::empty(input->features().shape, tv::int8, 0);
     auto input_features_ptr = input_features.data_ptr<__half>();
     auto input_features_int8_ptr = input_features_int8.data_ptr<int8_t>();
     tv::kernel_1d_map_cuda(
@@ -316,12 +339,19 @@ void SparseConvolution::forward(
         });
     input_features = input_features_int8;
   }
+  // with new sparseDTensor update input_spatial_shape/output_spatial_shape from grid size
+  input_spatial_shape_ = input->grid_size();
+  output_spatial_shape_ = input->grid_size();
+  if (!subm_) {
+  output_spatial_shape_ = get_conv_output_size(input_spatial_shape_,
+                            kernel_size_, stride_, padding_, dilation_);
+  }
   // for regular conv, the input tensor has static shape, we should save a CPU
   // variable of real num_act_out. here we just use num_act_in.
   int real_num_features = input_features.dim(0);
   // get input indices
   tv::Tensor input_indices =
-      tv::Tensor(input->indices_data(), input->indices_shape(), tv::int32, 0);
+      tv::Tensor(input->indices().ptr(), input->indices().shape, tv::int32, 0);
   // you need to slice all static inputs with real_num_act_in in
   // static inference engine, e.g. tensorrt. here we don't
   // need to do that.
@@ -396,13 +426,13 @@ void SparseConvolution::forward(
   // create output tensor allocator
   std::unordered_map<std::string, tv::Tensor> tensor_dict{
       {SPCONV_ALLOC_FEATURES, input_features},
-      {SPCONV_ALLOC_FILTERS, weights_},
+      {SPCONV_ALLOC_FILTERS, weight_},
       {SPCONV_ALLOC_OUT_FEATURES, out_features_}};
   StaticAllocator alloc2(tensor_dict);
   // ConvTunerSimple tuner(ConvMain::get_all_conv_algo_desp());
   // auto output_add = tv::Tensor();
   auto conv_run_status = ConvGemmOps::implicit_gemm(
-      alloc2, *conv_tuner_, input_features, weights_, pair_fwd_real,
+      alloc2, *conv_tuner_, input_features, weight_, pair_fwd_real,
       pair_mask_splits, mask_argsort_splits, num_act_out_real, mask_tensor_,
       arch_, false, subm_, reinterpret_cast<std::uintptr_t>(stream),
       tv::CUDAKernelTimer(false), false, false, bias_,
@@ -414,13 +444,19 @@ void SparseConvolution::forward(
                                     out_features_real.shape().end()};
   std::vector<int64_t> output_indices_shape{out_indices_real.shape().begin(),
                                             out_indices_real.shape().end()};
-  io_dict[output_name_] = std::make_shared<spconv::DTensorImplement>(
-      output_shape, convert_to_spconv_datatype(out_features_real.dtype()),
-      (void*)out_features_real.raw_data(), output_indices_shape,
-      convert_to_spconv_datatype(out_indices_real.dtype()),
-      subm_ ? (void*)input_indices.raw_data()
-            : (void*)out_indices_real.raw_data(),
-      output_spatial_shape_, out_features_real.device());
+//  auto out = std::make_shared<spconv::SparseDTensorImplement>(output_name_);
+  auto output_iterator = io_dict.find(output_name_);
+  THROW_COND_EXCEPTION((output_iterator != io_dict.end()), std::out_of_range, 
+                           "cannot find output in io_dict", output_name_);
+  auto out = output_iterator->second;
+  out->features().reference((void*)out_features_real.raw_data(), 
+    output_shape, convert_to_spconv_datatype(out_features_real.dtype()));
+  out->indices().reference(
+    subm_ ? (void*)input_indices.raw_data() : (void*)out_indices_real.raw_data(),
+    output_indices_shape, convert_to_spconv_datatype(out_indices_real.dtype()));
+  out->set_grid_size(output_spatial_shape_);
+  // out->set_device(out_features_real.device());
+  // io_dict[output_name_] = out ;
 
   // checkCudaErrors(cudaStreamSynchronize(_stream));
 }

@@ -80,16 +80,6 @@ using namespace std;
     }                                                  \
   }();
 
-/*
-      case DataType::Int16: {                          \
-        using scalar_t = short;                        \
-        return __VA_ARGS__();                          \
-      }                                                \
-      case DataType::UInt16: {                         \
-        using scalar_t = unsigned short;               \
-        return __VA_ARGS__();                          \
-      }                                                \ */
-
 float native_half2float(const unsigned short h) {
   unsigned int sign = ((static_cast<unsigned int>(h) >> 15U) & 1U);
   unsigned int exponent = ((static_cast<unsigned int>(h) >> 10U) & 0x1fU);
@@ -165,7 +155,7 @@ static __global__ void any_to_any_device(size_t num, uint64_t* input,
 }
 
 template <>
-std::string format_shape(const std::vector<int64_t>& shape, bool space) {
+const char* format_shape(const std::vector<int64_t>& shape, bool space) {
   char buf[200] = {0};
   char* p = buf;
   for (size_t i = 0; i < shape.size(); ++i) {
@@ -173,12 +163,13 @@ std::string format_shape(const std::vector<int64_t>& shape, bool space) {
       p += sprintf(p, "%ld x ", shape[i]);
     else
       p += sprintf(p, "%ld", shape[i]);
-  }
+}
+  printf("%s\n", buf);
   return buf;
 }
 
 template <>
-std::string format_shape(const std::vector<int>& shape, bool space) {
+const char* format_shape(const std::vector<int>& shape, bool space) {
   char buf[200] = {0};
   char* p = buf;
   for (size_t i = 0; i < shape.size(); ++i) {
@@ -345,8 +336,9 @@ void Tensor::create_(const std::vector<int64_t>& shape, DataType dtype,
 Tensor Tensor::create(vector<int64_t> shape, DataType dtype, bool device) {
   return Tensor(shape, dtype, device);
 }
-// Tensor Tensor::create(vector<int32_t> shape, DataType dtype, bool device) {
-// return create(to_int64(shape), dtype, device); }
+
+Tensor Tensor::create(vector<int32_t> shape, DataType dtype, bool device) {
+return create(to_int64(shape), dtype, device); }
 
 void Tensor::reference(void* data, vector<int64_t> shape, DataType dtype,
                        bool device) {
@@ -382,10 +374,10 @@ Tensor Tensor::from_data(void* data, vector<int64_t> shape, DataType dtype,
   return output;
 }
 
-// Tensor Tensor::from_data(void* data, vector<int32_t> shape, DataType dtype,
-// bool device, void* stream) {
-//   return from_data(data, to_int64(shape), dtype, device, stream);
-// }
+Tensor Tensor::from_data(void* data, vector<int32_t> shape, DataType dtype,
+bool device, void* stream) {
+  return from_data(data, to_int64(shape), dtype, device, stream);
+}
 
 Tensor Tensor::from_data_reference(void* data, vector<int64_t> shape,
                                    DataType dtype, bool device) {
@@ -411,7 +403,7 @@ void Tensor::to_device_(void* stream_) {
   }
 }
 
-Tensor Tensor::to_device(void* stream_) {
+Tensor Tensor::to_device(void* stream_) const {
   if (!this->device() && !this->empty()) {
     cudaStream_t stream = (cudaStream_t)stream_;
     Tensor output(shape, this->dtype(), true);
@@ -435,7 +427,7 @@ void Tensor::to_host_(void* stream_) {
   }
 }
 
-Tensor Tensor::to_host(void* stream_) {
+Tensor Tensor::to_host(void* stream_) const {
   if (this->device() && !this->empty()) {
     cudaStream_t stream = (cudaStream_t)stream_;
     Tensor output(shape, this->dtype(), false);
@@ -473,9 +465,10 @@ void Tensor::memset(unsigned char value, void* stream) {
   }
 }
 
-Tensor Tensor::load_from_raw(const std::string& file,
+Tensor Tensor::load_from_raw(const char* fil,
                              std::vector<int64_t> shape, DataType dtype,
-                             bool device) {
+                             bool device, void* stream) {
+  std::string file(fil);
   FILE* f = fopen(file.c_str(), "rb");
   if (f == nullptr) return Tensor();
 
@@ -550,7 +543,8 @@ Tensor Tensor::load_from_raw(const std::string& file,
   return output;
 }
 
-Tensor Tensor::load(const std::string& file, bool device) {
+Tensor Tensor::load(const char* fil, bool device, void *stream) {
+  std::string file(fil);
   FILE* f = fopen(file.c_str(), "rb");
   if (f == nullptr) return Tensor();
 
@@ -605,10 +599,11 @@ Tensor Tensor::load(const std::string& file, bool device) {
   return output;
 }
 
-void Tensor::print(const std::string& prefix, size_t offset,
-                   size_t num_per_line, size_t lines) const {
+void Tensor::print(const char* prefi, size_t offset,
+                   size_t num_per_line, size_t lines, void* stream) const {
+  std::string prefix(prefi);
   printf("%s[%s] %s%s", prefix.c_str(), dtype_string(dtype()),
-         format_shape(shape).c_str(), lines == 1 ? ": " : ": \n");
+         format_shape(shape), lines == 1 ? ": " : ": \n");
 
   if (this->empty()) {
     printf("empty.\n");
@@ -683,7 +678,7 @@ void Tensor::print(const std::string& prefix, size_t offset,
 //   }
 // }
 
-Tensor Tensor::clone(void* _stream) {
+Tensor Tensor::clone(void* _stream) const {
   Tensor output = *this;
   cudaStream_t stream = (cudaStream_t)_stream;
   if (this->device() && !this->empty()) {
@@ -704,7 +699,7 @@ Tensor Tensor::clone(void* _stream) {
   return output;
 }
 
-Tensor Tensor::to_half(void* _stream) {
+Tensor Tensor::to_half(void* _stream) const {
   Tensor output;
   cudaStream_t stream = (cudaStream_t)_stream;
 
@@ -744,7 +739,8 @@ Tensor Tensor::to_half(void* _stream) {
 //   return output;
 // }
 
-bool Tensor::save(const std::string& file, void* stream_) const {
+bool Tensor::save(const char* fil, void* stream_) const {
+  std::string file(fil);
   cudaStream_t stream = (cudaStream_t)stream_;
   FILE* f = fopen(file.c_str(), "wb");
   if (f == nullptr) {
@@ -785,8 +781,8 @@ bool Tensor::save(const std::string& file, void* stream_) const {
 //   }
 // }
 
-bool Tensor::save(const Tensor& tensor, const std::string& file, void* stream) {
-  return tensor.save(file, stream);
+bool Tensor::save(const Tensor& tensor, const char* fil, void* stream) {
+  return tensor.save(fil, stream);
 }
 
 };  // namespace spconv

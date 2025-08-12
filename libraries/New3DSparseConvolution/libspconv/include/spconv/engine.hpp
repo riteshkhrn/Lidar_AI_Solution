@@ -1,24 +1,13 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
  */
  
 #ifndef __SPCONV_ENGINE_HPP__
@@ -27,29 +16,29 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <spconv/tensor.hpp>
 
 namespace spconv {
 
 #define Exported __attribute__((visibility("default")))
 
-enum class DType : int { None = 0, Int32 = 1, Float16 = 2, Int8 = 7 };
 enum class Precision : int { None = 0, Float16 = 1, Int8 = 2 };
+enum class TensorLayout : int { None = 0, NCHW = 1, NCHW32 = 2 };
 
 /**
   Storage of data tensor
 **/
-class DTensor {
+class SparseDTensor {
  public:
-  virtual std::vector<int64_t> features_shape() const = 0;
-  virtual DType features_dtype() const = 0;
-  virtual void* features_data() = 0;
+  virtual ~SparseDTensor(){}
+  virtual Tensor& features() = 0;
+  virtual Tensor& indices()  = 0;
 
-  virtual std::vector<int64_t> indices_shape() const = 0;
-  virtual DType indices_dtype() const = 0;
-  virtual void* indices_data() = 0;
-
+  virtual void set_grid_size(const std::vector<int>& grid_size) = 0;
   virtual std::vector<int> grid_size() const = 0;
   virtual int device() const = 0;
+
+  virtual const char* name() const = 0;
 };
 
 /**
@@ -57,6 +46,7 @@ class DTensor {
 **/
 class Engine {
  public:
+  Exported virtual ~Engine(){}
   /**
     Inference function for sparse convolution
 
@@ -70,38 +60,101 @@ class Engine {
     grid_size:      The grid size of the input data, For example: 41,1440,1440 or 1440,1440,41
     stream:         Which stream is expected to enqueue the inference.
   **/
-  Exported virtual DTensor* forward(const std::vector<int64_t>& features_shape,
-                                    DType features_dtype, void* features_data,
-                                    const std::vector<int64_t>& indices_shape, DType indices_dtype,
-                                    void* indices_data, int batch, std::vector<int> grid_size,
-                                    void* stream = nullptr) = 0;
+  Exported virtual void forward(void* stream = nullptr) = 0;
+  Exported virtual size_t num_input() const = 0;
+  Exported virtual SparseDTensor* input(unsigned int index) = 0;
+  Exported virtual size_t num_output() const = 0;
+  Exported virtual SparseDTensor* output(unsigned int index) = 0;
+};
 
-  // If you change the precision of a node after loading the model, you should call this function to
-  // reconfigure it
-  Exported virtual void reconfigure() = 0;
+class ITensor{
+public:
+  virtual ~ITensor(){}
+  virtual const char* name() = 0;
+};
 
-  // If you want to execute an implicit PTQ calibration, you can enable int8calibration by marking
-  // it and collecting the maximum value of the tensor in the next forward.
-  Exported virtual void set_int8_calibration(bool enable) = 0;
+class INode{
+public:
+  virtual ~INode(){}
+  virtual const char* name() = 0;
+  virtual const char* optype() = 0;
+  virtual ITensor* input(unsigned int index) = 0;
+  virtual ITensor* output(unsigned int index) = 0;
 
-  // You can modify the precision of a node with this function, but don't forget to call reconfigure
-  Exported virtual void set_node_precision_byname(const char* name, Precision compute_precision,
-                                                  Precision output_precision) = 0;
-  Exported virtual void set_node_precision_byoptype(const char* optype, Precision compute_precision,
-                                                    Precision output_precision) = 0;
+  virtual unsigned int num_output() = 0;
+  virtual unsigned int num_input() = 0;
+};
+
+class EngineBuilder{
+public:
+  Exported virtual ~EngineBuilder(){}
+  Exported virtual ITensor* push_input(const char* name) = 0;
+  Exported virtual INode* push_add(
+      const char* name, 
+      ITensor* a, 
+      ITensor* b,
+      float a_dynamic_range,
+      float b_dynamic_range,
+      const char* output_name,
+      Precision precision, Precision output_precision) = 0;
+
+  Exported virtual INode* push_relu(
+      const char* name, 
+      ITensor* x, 
+      const char* output_name) = 0;
+
+  Exported virtual INode* push_dense(
+      const char* name, ITensor* x,
+      const char* format,
+      const char* output_name,
+      const std::vector<int>& input_spatial_shape,
+      const std::vector<int>& output_shape,
+      TensorLayout output_layout = TensorLayout::NCHW,
+      float input_dynamic_range = 0.0f              // Enabled if int8 out
+  ) = 0;
+
+  Exported virtual INode* push_reshape(
+      const char* name, ITensor* x, 
+      const std::vector<int64_t>& shape,
+      const char* output_name) = 0;
+
+  Exported virtual INode* push_transpose(
+      const char* name, ITensor* x, 
+      const std::vector<int64_t>& dims,
+      const char* output_name) = 0;
+
+  Exported virtual INode* push_sparse_conv(
+      const char* name, 
+      ITensor* x,
+      const std::vector<unsigned short>& weight,
+      const std::vector<int>& weight_shape,
+      const std::vector<float>& weight_dynamic_ranges,
+      const std::vector<unsigned short>& bias,
+      const std::vector<int>& bias_shape,
+      const char* activation,
+      const std::vector<int>& kernel_size,
+      const std::vector<int>& stride,
+      const std::vector<int>& padding,
+      const std::vector<int>& dilation,
+      float input_dynamic_range,
+      bool submanifold,
+      int max_output_points,
+      const char* rulebook,
+      Precision precision,
+      Precision output_precision,
+      const char* output_name, 
+      bool inverse) = 0;
+
+  Exported virtual void push_output(ITensor* value) = 0;
+
+  // build engine
+  Exported virtual std::shared_ptr<Engine> build(Precision precision, void* stream = nullptr) = 0;
 };
 
 /**
-  Create an engine and load the weights from onnx file
-
-  onnx_file: Store the onnx of model structure, please use tool/deploy/export-scn.py to export the
-corresponding onnx precision: What precision to use for model inference. For each layer's precision
-should be stored in the "precision" attribute of the layer
-            - Model inference will ignore the "precision" attribute of each layer what if set to
-Float16
-**/
-Exported std::shared_ptr<Engine> load_engine_from_onnx(const std::string& onnx_file,
-                                                       Precision precision = Precision::Float16);
+ * To build a engine.
+*/
+Exported std::shared_ptr<EngineBuilder> create_engine_builder();
 
 /**
   Enable detailed information output
@@ -110,7 +163,9 @@ Exported std::shared_ptr<Engine> load_engine_from_onnx(const std::string& onnx_f
   false
 */
 Exported void set_verbose(bool enable);
+Exported bool get_verbose();
 Exported const char* get_precision_string(Precision precision);
+Exported const char* get_tensor_layout_string(TensorLayout layout);
 
 };  // namespace spconv
 

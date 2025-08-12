@@ -21,7 +21,7 @@
     throw e(msg.str());                                          \
   } while (false)
 
-#define THROW_COND_EXCEPTION(e, cond, ...)                         \
+#define THROW_COND_EXCEPTION(cond, e,  ...)                         \
   do {                                                             \
     if (!cond) {                                                   \
       std::stringstream msg;                                       \
@@ -59,64 +59,65 @@ std::string ssprint(TArgs... args) {
   return ss.str();
 }
 
-class DTensorImplement : public DTensor {
- public:
-  DTensorImplement(std::vector<int64_t> features_shape, DType features_dtype,
-                   void* features_data,
-                   std::vector<int64_t> indices_shape = std::vector<int64_t>(),
-                   DType indices_dtype = DType::None,
-                   void* indices_data = nullptr,
-                   std::vector<int> grid_size = std::vector<int>(),
-                   int device = -1)
-      : features_shape_(features_shape),
-        features_dtype_(features_dtype),
-        features_data_(features_data),
-        indices_shape_(indices_shape),
-        indices_dtype_(indices_dtype),
-        indices_data_(indices_data),
-        grid_size_(grid_size),
-        device_(device) {}
-  virtual std::vector<int64_t> features_shape() const {
-    return features_shape_;
-  }
-  virtual DType features_dtype() const { return features_dtype_; }
-  virtual void* features_data() { return features_data_; }
-
-  virtual std::vector<int64_t> indices_shape() const { return indices_shape_; }
-  virtual DType indices_dtype() const { return indices_dtype_; }
-  virtual void* indices_data() { return indices_data_; }
-
-  virtual std::vector<int> grid_size() const { return grid_size_; }
-  virtual int device() const { return device_; }
-
- private:
-  std::vector<int64_t> features_shape_;
-  DType features_dtype_;
-  void* features_data_;
-  std::vector<int64_t> indices_shape_;
-  DType indices_dtype_;
-  void* indices_data_;
-  std::vector<int> grid_size_;
-  int device_;
-};
+// overload the ostream << opertor for precision
+std::ostream& operator<<(std::ostream& out, const spconv::Precision precision);
 
 class Operation {
  public:
-  virtual void set_precision(
+  virtual void configure(
       spconv::Precision precision,
-      std::unordered_map<std::string, float>& tensor_name_to_scale) {};
+      std::unordered_map<std::string, float>& tensor_name_to_scale,
+      std::unordered_map<std::string, std::shared_ptr<void>> parameters) = 0;
   virtual void forward(
-      std::unordered_map<std::string, std::shared_ptr<spconv::DTensor>>&
-          io_dict,
+      std::unordered_map<std::string, std::shared_ptr<SparseDTensor>>&  io_dict,
       void* stream) = 0;
 };
 
-// shared device code
+class UnspportedOperation : public Operation {
+ public:
+  virtual void configure(
+      spconv::Precision precision,
+      std::unordered_map<std::string, float>& tensor_name_to_scale,
+      std::unordered_map<std::string, std::shared_ptr<void>> parameters) {
+    THROW_EXCEPTION(std::runtime_error, "Operation not implemented yet");
+  };
+  virtual void forward(
+      std::unordered_map<std::string, std::shared_ptr<SparseDTensor>>&  io_dict,
+      void* stream) {
+    THROW_EXCEPTION(std::runtime_error, "Operation not implemented yet");
+  }
+};
 
-// extern __device__ int clamp(int x, int a, int b);
-
-// extern __device__ int quantize(float inp, float scale);
-
+class IdenityOperation : public Operation {
+  public:
+   IdenityOperation(std::string input_name, std::string output_name) 
+    :input_name_(input_name),
+     output_name_(output_name) {}
+     virtual void configure(
+        spconv::Precision precision,
+        std::unordered_map<std::string, float>& tensor_name_to_scale,
+        std::unordered_map<std::string, std::shared_ptr<void>> parameters) {};
+   virtual void forward(
+       std::unordered_map<std::string, std::shared_ptr<SparseDTensor>>&  io_dict,
+       void* stream) {
+        auto input_iterator = io_dict.find(input_name_);
+        THROW_COND_EXCEPTION((input_iterator != io_dict.end()), std::out_of_range, 
+                            input_name_, "input not found");
+        auto input = input_iterator->second;
+        auto output_iterator = io_dict.find(output_name_);
+        THROW_COND_EXCEPTION((output_iterator != io_dict.end()), std::out_of_range, 
+                                 "cannot find output in io_dict", output_name_);
+        auto out = output_iterator->second;
+        out->features().reference((void*)input->features().ptr(), 
+        input->features().shape, input->features().dtype());
+        out->indices().reference((void*)input->indices().ptr(), 
+        input->indices().shape, input->indices().dtype());
+        out->set_grid_size(input->grid_size());
+   }
+  private:
+  std::string input_name_;
+  std::string output_name_;
+};
 };  // namespace spconv
 
 #endif  // __COMMON_HPP__

@@ -39,30 +39,31 @@ using GemmTunerSimple =
 class SparseConvolution : public spconv::Operation {
  public:
   SparseConvolution(
-      std::string input_name, std::string input_precision,
-      std::string output_name, std::string output_precision, void* weights,
-      std::vector<int> weight_shape, void* bias, std::vector<int> bias_shape,
+      std::string input_name, spconv::Precision input_precision,
+      std::string output_name, spconv::Precision output_precision, const void* weights,
+      std::vector<int> weight_shape, const void* bias, std::vector<int> bias_shape,
       int ndim, std::vector<int> input_spatial_shape,
       std::vector<int> output_spatial_shape, int in_channels, int out_channels,
       std::vector<int> kernel_size, int output_bound, std::vector<int> stride,
       std::vector<int> dilation, std::vector<int> padding, int transposed,
       int inverse, std::vector<int> output_padding, int groups, int subm,
       std::string rulebook, std::string activation,
-      std::vector<int> input_shape, std::vector<int> output_shape,
+      std::vector<int64_t> input_shape, std::vector<int64_t> output_shape,
       float input_dynamic_range, std::vector<float> weight_dynamic_range);
   ~SparseConvolution();
-  void set_precision(
+  void configure(
       spconv::Precision precision,
-      std::unordered_map<std::string, float>& tensor_name_to_scale);
-  void forward(std::unordered_map<std::string,
-                                  std::shared_ptr<spconv::DTensor>>& io_dict,
-               void* stream);
+      std::unordered_map<std::string, float>& tensor_name_to_scale,
+      std::unordered_map<std::string, std::shared_ptr<void>> parameters);
+  void forward(
+    std::unordered_map<std::string, std::shared_ptr<spconv::SparseDTensor>>& io_dict,
+    void* stream);
 
  private:
   std::string input_name_;
   std::string output_name_;
-  std::string input_precision_;
-  std::string output_precision_;
+  spconv::Precision input_precision_;
+  spconv::Precision output_precision_;
   int ndim_;
   std::vector<int> input_spatial_shape_;
   std::vector<int> output_spatial_shape_;
@@ -80,8 +81,8 @@ class SparseConvolution : public spconv::Operation {
   int subm_;
   std::string rulebook_;
   std::string activation_;
-  std::vector<int> input_shape_;
-  std::vector<int> output_shape_;
+  std::vector<int64_t> input_shape_;
+  std::vector<int64_t> output_shape_;
   float input_dynamic_range_;
   std::vector<float> weight_dynamic_range_;
   float input_scale_;
@@ -94,7 +95,7 @@ class SparseConvolution : public spconv::Operation {
   int max_act_out_theory_;
   bool use_direct_table_;
   // tensor view
-  tv::Tensor weights_;
+  tv::Tensor weight_;
   tv::Tensor bias_;
   tv::Tensor workspace_;
   tv::Tensor pair_fwd_padded_;

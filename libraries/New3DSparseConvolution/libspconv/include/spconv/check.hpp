@@ -1,24 +1,13 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: MIT
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to deal in the Software without restriction, including without limitation
- * the rights to use, copy, modify, merge, publish, distribute, sublicense,
- * and/or sell copies of the Software, and to permit persons to whom the
- * Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in
- * all copies or substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
- * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
  */
  
 #ifndef __SPCONV_CHECK_HPP__
@@ -28,36 +17,29 @@
 #include <cuda_runtime.h>
 #include <stdarg.h>
 #include <stdio.h>
-
 #include <string>
 
 namespace spconv {
 
-#if DEBUG
-#define checkRuntime(call) spconv::check_runtime(call, #call, __LINE__, __FILE__)
-#define checkKernel(...)                                                                \
-  [&] {                                                                                 \
-    __VA_ARGS__;                                                                        \
-    checkRuntime(cudaStreamSynchronize(nullptr));                                       \
-    return spconv::check_runtime(cudaGetLastError(), #__VA_ARGS__, __LINE__, __FILE__); \
-  }()
-#define dprintf printf
+#ifdef __SPCONV_FAILED_WITH_ABORT__
+#define __SPCONV_ABORT__   abort()
 #else
+#define __SPCONV_ABORT__
+#endif
+
 #define checkRuntime(call) spconv::check_runtime(call, #call, __LINE__, __FILE__)
 #define checkKernel(...)                                                            \
   do {                                                                              \
     __VA_ARGS__;                                                                    \
     spconv::check_runtime(cudaPeekAtLastError(), #__VA_ARGS__, __LINE__, __FILE__); \
   } while (0)
-#define dprintf(...)
-#endif
 
 #define Assertf(cond, fmt, ...)                                                                 \
   do {                                                                                          \
     if (!(cond)) {                                                                              \
       fprintf(stderr, "Assert failed 💀. %s in file %s:%d, message: " fmt "\n", #cond, __FILE__, \
               __LINE__, __VA_ARGS__);                                                           \
-      abort();                                                                                  \
+      __SPCONV_ABORT__;                                                                                  \
     }                                                                                           \
   } while (false)
 #define Asserts(cond, s)                                                                      \
@@ -65,14 +47,14 @@ namespace spconv {
     if (!(cond)) {                                                                            \
       fprintf(stderr, "Assert failed 💀. %s in file %s:%d, message: " s "\n", #cond, __FILE__, \
               __LINE__);                                                                      \
-      abort();                                                                                \
+      __SPCONV_ABORT__;                                                                                \
     }                                                                                         \
   } while (false)
 #define Assert(cond)                                                                     \
   do {                                                                                   \
     if (!(cond)) {                                                                       \
       fprintf(stderr, "Assert failed 💀. %s in file %s:%d\n", #cond, __FILE__, __LINE__); \
-      abort();                                                                           \
+      __SPCONV_ABORT__;                                                                           \
     }                                                                                    \
   } while (false)
 
@@ -90,7 +72,7 @@ static inline bool check_runtime(cudaError_t e, const char *call, int line, cons
             "CUDA Runtime error %s # %s, code = %s [ %d ] in file "
             "%s:%d\n",
             call, cudaGetErrorString(e), cudaGetErrorName(e), e, file, line);
-    abort();
+    __SPCONV_ABORT__;
     return false;
   }
   return true;

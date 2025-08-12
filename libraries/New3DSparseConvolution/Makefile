@@ -29,18 +29,20 @@ cppstrict := -Wall -Werror -Wextra -Werror=all-warnings
 nvcc      := $(CUDA_HOME)/bin/nvcc
 cuda_arch := -gencode arch=compute_80,code=sm_80 \
 			 -gencode arch=compute_86,code=sm_86
+LIBSPCONV_DIR := spconv/example/libspconv
+CUMM_DIR := $(LIBSPCONV_DIR)/cumm
 
 ifeq ($(arch), aarch64)
 cuda_arch += -gencode arch=compute_87,code=sm_87
 endif
 
 spconv2flags      := --expt-relaxed-constexpr --extended-lambda -DTV_CUDA -DVERBOSE
-include_paths     := -Isrc -Ilibspconv/include -Ilibspconv/src -I$(CUDA_HOME)/include -I/ritesh/repos/spconv/example/libspconv/spconv/include
+include_paths     := -Isrc -Ilibspconv/include -Ilibspconv/src -I$(CUDA_HOME)/include -I$(LIBSPCONV_DIR)/spconv/include -I$(CUMM_DIR)/include
 cpp_compile_flags := -std=$(stdcpp) $(strict) -g $(optimize) -fPIC -fopenmp -pthread $(include_paths)
 cu_compile_flags  := -std=$(stdcpp) $(spconv2flags) $(custrict) -g $(optimize) $(cuda_arch) -Xcompiler "$(cpp_compile_flags)"
-link_flags        := -Llibspconv/lib/$(arch) -lscn -L$(CUDA_HOME)/lib64 -lcudart -lstdc++ -ldl -pthread -lprotobuf \
-										 -L/ritesh/repos/spconv/example/libspconv/build/spconv/src -lspconv \
-					 					 -fopenmp -Wl,-rpath='$$ORIGIN' -Wl,-rpath=$(pwd)/libspconv/lib/$(arch) -Wl,-rpath=/ritesh/repos/spconv/example/libspconv/build/spconv/src
+link_flags        := -Llibspconv/lib/$(arch) -lscn -L$(CUDA_HOME)/lib64 -lcudart -lstdc++ -ldl -pthread -L/usr/local/lib -lprotobuf \
+										 -L$(LIBSPCONV_DIR)/build/spconv/src -lspconv \
+					 					 -fopenmp -Wl,-rpath='$$ORIGIN' -Wl,-rpath=$(pwd)/libspconv/lib/$(arch) -Wl,-rpath=$(pwd)/$(LIBSPCONV_DIR)/build/spconv/src
 
 ifeq ($(MAKECMDGOALS), pyscn)
 python_include := $(shell python -c "import sysconfig;print(sysconfig.get_path('include'))")
@@ -56,12 +58,12 @@ cu_compile_flags  += -I$(python_include) -I$(pybind_include)
 link_flags        += -L$(python_libpath) -l$(python_soname)
 endif
 
-all   : libspconv/lib/$(arch)/libscn.so pro pyscn
+all   : libspconv/lib/$(arch)/libscn.so pro
 pro   : workspace/pro
 pyscn : tool/pyscn.so
 
 libspconv_cpp_obj  := libspconv/objs/engine.o \
-					 						libspconv/objs/onnx.proto3.pb.o
+					 						libspconv/objs/common.o
 
 libspconv_cu_obj   := libspconv/objs/sparseConvImplicit.uo \
 											libspconv/objs/sparseFusedAddRelu.uo \
@@ -82,12 +84,12 @@ memint8      : pro
 memfp16      : pro
 	@cd workspace && ./pro memfp16
 
-tool/pyscn.so : objs/pyscn.o
+tool/pyscn.so : objs/pyscn.o objs/onnx-parser.o objs/onnx/onnx-ml.pb.o objs/onnx/onnx-operators-ml.pb.o
 	@echo Link $@
 	@$(cc) -shared -o $@ $^ $(link_flags)
 	@echo You can run \"python tool/pytest.py\" to test
 
-workspace/pro : objs/main.o objs/voxelization.uo
+workspace/pro : objs/main.o objs/voxelization.uo objs/onnx-parser.o objs/onnx/onnx-ml.pb.o objs/onnx/onnx-operators-ml.pb.o
 	@echo Link $@
 	@$(cc) -o $@ $^ $(link_flags)
 

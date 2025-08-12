@@ -11,23 +11,25 @@
 class SparseAdd : public spconv::Operation {
  public:
   SparseAdd(std::string input_name_0, std::string input_name_1,
-            std::string input_precision, std::string output_name,
-            std::string output_precision, int output_bound, int out_channels);
+            spconv::Precision input_precision, std::string output_name,
+            spconv::Precision output_precision, int output_bound, int out_channels);
   ~SparseAdd();
-  void set_precision(
+
+  void configure(
       spconv::Precision precision,
-      std::unordered_map<std::string, float>& tensor_name_to_scale);
-  void forward(std::unordered_map<std::string,
-                                  std::shared_ptr<spconv::DTensor>>& io_dict,
-               void* stream);
+      std::unordered_map<std::string, float>& tensor_name_to_scale,
+      std::unordered_map<std::string, std::shared_ptr<void>> parameters);
+  void forward(
+      std::unordered_map<std::string, std::shared_ptr<spconv::SparseDTensor>>& io_dict,
+      void* stream);
 
  private:
   bool int8_inference_;
   std::string input_name_1_;
   std::string input_name_2_;
-  std::string input_precision_;
+  spconv::Precision input_precision_;
   std::string output_name_;
-  std::string output_precision_;
+  spconv::Precision output_precision_;
   float input_scale_1_;
   float input_scale_2_;
   float output_scale_;

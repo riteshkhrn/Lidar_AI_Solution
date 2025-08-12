@@ -30,40 +30,47 @@ SparseRelu::~SparseRelu() {
   if (output_) checkRuntime(cudaFree(output_));
 }
 
-void SparseRelu::set_precision(
+void SparseRelu::configure(
     spconv::Precision precision,
-    std::unordered_map<std::string, float>& tensor_name_to_scale) {
+    std::unordered_map<std::string, float>& tensor_name_to_scale,
+    std::unordered_map<std::string, std::shared_ptr<void>> parameters) {
   // should do int8 inference
   int8_inference_ = precision == spconv::Precision::Int8;
   LOG("Doing int8 inference", int8_inference_);
 }
 
 void SparseRelu::forward(
-    std::unordered_map<std::string, std::shared_ptr<spconv::DTensor>>& io_dict,
+    std::unordered_map<std::string, std::shared_ptr<spconv::SparseDTensor>> &io_dict,
     void* stream) {
   // find the inputs
   auto input_iterator = io_dict.find(input_name_);
-  THROW_COND_EXCEPTION(std::out_of_range, (input_iterator != io_dict.end()),
+  THROW_COND_EXCEPTION((input_iterator != io_dict.end()), std::out_of_range, 
                        input_name_, "input not found");
 
   auto input = input_iterator->second;
 
   cudaStream_t _stream = reinterpret_cast<cudaStream_t>(stream);
-  auto input_shape = input->features_shape();
+  auto input_shape = input->features().shape;
   int64_t num_indices = std::accumulate(input_shape.begin(), input_shape.end(),
                                         int64_t(1), std::multiplies<int64_t>());
   if (int8_inference_) {
     cuda_linear_launch(relu_kernel<int8_t>, _stream, num_indices,
-                       reinterpret_cast<int8_t*>(input->features_data()),
+                       reinterpret_cast<int8_t*>(input->features().ptr()),
                        reinterpret_cast<int8_t*>(output_));
   } else {
     cuda_linear_launch(relu_kernel<half>, _stream, num_indices,
-                       reinterpret_cast<half*>(input->features_data()),
+                       reinterpret_cast<half*>(input->features().ptr()),
                        reinterpret_cast<half*>(output_));
   }
 
-  io_dict[output_name_] = std::make_shared<spconv::DTensorImplement>(
-      input->features_shape(), input->features_dtype(), (void*)output_,
-      input->indices_shape(), input->indices_dtype(), input->indices_data(),
-      input->grid_size(), input->device());
+//  auto out = std::make_shared<spconv::SparseDTensorImplement>(output_name_);
+  auto output_iterator = io_dict.find(output_name_);
+  THROW_COND_EXCEPTION((output_iterator != io_dict.end()), std::out_of_range, 
+                           "cannot find output in io_dict", output_name_);
+  auto out = output_iterator->second;
+  out->features().reference((void*)output_, input->features().shape, input->features().dtype());
+  out->indices().reference(input->indices().ptr(), input->indices().shape, input->indices().dtype());
+  out->set_grid_size(input->grid_size());
+  // out->set_device(input->device());
+  // io_dict[output_name_] = out ;
 }
