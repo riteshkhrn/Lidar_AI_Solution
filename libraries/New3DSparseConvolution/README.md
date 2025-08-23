@@ -1,5 +1,7 @@
 # 3D Sparse Convolution Network
-An opensource sparse inference engine for [3d sparse convolutional networks](https://github.com/tianweiy/CenterPoint/blob/master/det3d/models/backbones/scn.py) based on [libspconv](https://github.com/traveller59/spconv) using int8/fp16.
+An opensource sparse inference engine for [3d sparse convolutional networks](https://github.com/tianweiy/CenterPoint/blob/master/det3d/models/backbones/scn.py) based on [traveller59/spconv](https://github.com/traveller59/spconv) using int8/fp16.
+
+An opensource library [libscn.so](#compile-and-run) is created which can be used as drop in replacement to libspconv.so
 
 ## Model && Data
 Use the same model and dataset as mentioned in original [README](https://github.com/NVIDIA-AI-IOT/Lidar_AI_Solution/blob/master/libraries/3DSparseConvolution/README.md)
@@ -11,29 +13,24 @@ TBD on new library
 TBD on new library
 
 ## Install Pre-Requisities
-1. Install cumm==0.4.11 from source
-2. Install spconv==2.3.6 from source(This directory would be **PATH_TO_INSTALLED_SPCONV**)
-3. Build [libspconv.so](https://github.com/traveller59/spconv/blob/v2.3.6/example/libspconv/run_build.sh)
-4. libprotobuf_dev==3.6.1
+1. libprotobuf_dev=3.6.1
+2. Build traveller59/spconv libspconv.so
 
-## Export ONNX
-1. Download and configure the CenterPoint environment from https://github.com/tianweiy/CenterPoint
-2. Export SCN ONNX
-```
-$ cp -r tool/centerpoint-export path/to/CenterPoint
-$ cd path/to/CenterPoint
-$ python centerpoint-export/export-scn.py --ckpt=epoch_20.pth --save-onnx=scn.nuscenes.onnx
-$ cp scn.nuscenes.onnx path/to/3DSparseConvolution/workspace/
-```
+    2.1 Modify the [build_deps](./build_deps.sh) for your env
+    ```
+    export CUMM_CUDA_VERSION=12.0 # cuda version, required but only used for flag selection when build libspconv.
+    export CUMM_CUDA_ARCH_LIST="7.5;8.6"
+    ```
+    2.2 Running build_deps.sh will install and build the necessary dependencies
+    ```
+    ./build_deps.sh
+    ```
 
-3. ## Compile && Run
-- Change the path to libspconv.so in Makefile
+## Compile and Run
+- To build the library libscn.so
 ```
-include_paths := -Isrc -Ilibspconv/include -Ilibspconv/src -I$(CUDA_HOME)/include -I<PATH_TO_INSTALLED_SPCONV>/example/libspconv/spconv/include
-link_flags    := -Llibspconv/lib/$(arch) -lscn -L$(CUDA_HOME)/lib64 -lcudart -lstdc++ -ldl -pthread -lprotobuf \
-                -L<PATH_TO_INSTALLED_SPCONV>/example/libspconv/build/spconv/src -lspconv \
-                -fopenmp -Wl,-rpath='$$ORIGIN' -Wl,-rpath=$(pwd)/libspconv/lib/$(arch) -Wl,-rpath=<PATH_TO_INSTALLED_SPCONV>/example/libspconv/build/spconv/src
-
+$ cd path/to/New3DSparseConvolution
+make all
 ```
 - Build and run test
 ```

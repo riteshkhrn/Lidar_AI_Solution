@@ -29,18 +29,20 @@ cppstrict := -Wall -Werror -Wextra -Werror=all-warnings
 nvcc      := $(CUDA_HOME)/bin/nvcc
 cuda_arch := -gencode arch=compute_80,code=sm_80 \
 			 -gencode arch=compute_86,code=sm_86
+LIBSPCONV_DIR := spconv/example/libspconv
+CUMM_DIR := $(LIBSPCONV_DIR)/cumm
 
 ifeq ($(arch), aarch64)
 cuda_arch += -gencode arch=compute_87,code=sm_87
 endif
 
 spconv2flags      := --expt-relaxed-constexpr --extended-lambda -DTV_CUDA -DVERBOSE
-include_paths     := -Isrc -Ilibspconv/include -Ilibspconv/src -I$(CUDA_HOME)/include -I/ritesh/repos/spconv/example/libspconv/spconv/include
+include_paths     := -Isrc -Ilibspconv/include -Ilibspconv/src -I$(CUDA_HOME)/include -I$(LIBSPCONV_DIR)/spconv/include -I$(CUMM_DIR)/include
 cpp_compile_flags := -std=$(stdcpp) $(strict) -g $(optimize) -fPIC -fopenmp -pthread $(include_paths)
 cu_compile_flags  := -std=$(stdcpp) $(spconv2flags) $(custrict) -g $(optimize) $(cuda_arch) -Xcompiler "$(cpp_compile_flags)"
 link_flags        := -Llibspconv/lib/$(arch) -lscn -L$(CUDA_HOME)/lib64 -lcudart -lstdc++ -ldl -pthread -lprotobuf \
-										 -L/ritesh/repos/spconv/example/libspconv/build/spconv/src -lspconv \
-					 					 -fopenmp -Wl,-rpath='$$ORIGIN' -Wl,-rpath=$(pwd)/libspconv/lib/$(arch) -Wl,-rpath=/ritesh/repos/spconv/example/libspconv/build/spconv/src
+										 -L$(LIBSPCONV_DIR)/build/spconv/src -lspconv \
+					 					 -fopenmp -Wl,-rpath='$$ORIGIN' -Wl,-rpath=$(pwd)/libspconv/lib/$(arch) -Wl,-rpath=$(pwd)/$(LIBSPCONV_DIR)/build/spconv/src
 
 ifeq ($(MAKECMDGOALS), pyscn)
 python_include := $(shell python -c "import sysconfig;print(sysconfig.get_path('include'))")
@@ -56,7 +58,7 @@ cu_compile_flags  += -I$(python_include) -I$(pybind_include)
 link_flags        += -L$(python_libpath) -l$(python_soname)
 endif
 
-all   : libspconv/lib/$(arch)/libscn.so pro pyscn
+all   : libspconv/lib/$(arch)/libscn.so pro
 pro   : workspace/pro
 pyscn : tool/pyscn.so
 
